@@ -1,7 +1,7 @@
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { useState, useEffect } from 'react'
-import { useDispatch } from 'react-redux'
+import { useState, useEffect, useMemo } from 'react'
+import { useDispatch, useSelector } from 'react-redux'
 import PropTypes from 'prop-types'
 
 import {
@@ -15,15 +15,19 @@ import {
     AccordionSummary,
     AccordionDetails,
     Typography,
-    Stack
+    Stack,
+    Card
 } from '@mui/material'
 import { CopyBlock, atomOneDark } from 'react-code-blocks'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
+import { useTheme } from '@mui/material/styles'
+import { useAuth } from '@/hooks/useAuth'
 
 // Project import
 import { Dropdown } from '@/ui-component/dropdown/Dropdown'
 import ShareChatbot from './ShareChatbot'
 import EmbedChat from './EmbedChat'
+import { Available } from '@/ui-component/rbac/available'
 
 // Const
 import { baseURL } from '@/store/constant'
@@ -36,12 +40,13 @@ import cURLSVG from '@/assets/images/cURL.svg'
 import EmbedSVG from '@/assets/images/embed.svg'
 import ShareChatbotSVG from '@/assets/images/sharing.png'
 import settingsSVG from '@/assets/images/settings.svg'
-import { IconBulb } from '@tabler/icons-react'
+import { IconBulb, IconBox, IconVariable, IconExclamationCircle } from '@tabler/icons-react'
 
 // API
 import apiKeyApi from '@/api/apikey'
 import chatflowsApi from '@/api/chatflows'
 import configApi from '@/api/config'
+import variablesApi from '@/api/variables'
 
 // Hooks
 import useApi from '@/hooks/useApi'
@@ -83,26 +88,86 @@ const APICodeDialog = ({ show, dialogProps, onCancel }) => {
     const portalElement = document.getElementById('portal')
     const navigate = useNavigate()
     const dispatch = useDispatch()
+    const theme = useTheme()
+    const chatflow = useSelector((state) => state.canvas.chatflow)
+    const apiConfig = chatflow?.apiConfig ? JSON.parse(chatflow.apiConfig) : {}
+    const overrideConfigStatus = apiConfig?.overrideConfig?.status !== undefined ? apiConfig.overrideConfig.status : false
 
-    const codes = ['Embed', 'Python', 'JavaScript', 'cURL', 'Share Chatbot']
+    const startNodeInputs = useMemo(() => {
+        if (!chatflow?.flowData) return null
+        try {
+            const parsed = JSON.parse(chatflow.flowData)
+            const startNode = (parsed.nodes || []).find((n) => n?.data?.name === 'startAgentflow')
+            return startNode?.data?.inputs ?? null
+        } catch {
+            return null
+        }
+    }, [chatflow?.flowData])
+
+    const startInputType = startNodeInputs?.startInputType
+    const isWebhookFlow = startInputType === 'webhookTrigger'
+    const isScheduleFlow = startInputType === 'scheduleInput'
+    const webhookMethod = (startNodeInputs?.webhookMethod || 'POST').toUpperCase()
+    const webhookContentType = startNodeInputs?.webhookContentType || 'application/json'
+    const webhookEnableAuth = startNodeInputs?.webhookEnableAuth === true
+    const webhookSignatureHeader = startNodeInputs?.webhookSignatureHeader || 'x-webhook-signature'
+    const webhookResponseMode = startNodeInputs?.webhookResponseMode || 'sync'
+
+    const codes = useMemo(() => {
+        if (isWebhookFlow || isScheduleFlow) return ['Python', 'JavaScript', 'cURL']
+        return ['Embed', 'Python', 'JavaScript', 'cURL', 'Share Chatbot']
+    }, [isWebhookFlow, isScheduleFlow])
     const [value, setValue] = useState(0)
-    const [keyOptions, setKeyOptions] = useState([])
     const [apiKeys, setAPIKeys] = useState([])
     const [chatflowApiKeyId, setChatflowApiKeyId] = useState('')
     const [selectedApiKey, setSelectedApiKey] = useState({})
     const [checkboxVal, setCheckbox] = useState(false)
     const [nodeConfig, setNodeConfig] = useState({})
     const [nodeConfigExpanded, setNodeConfigExpanded] = useState({})
+    const [nodeOverrides, setNodeOverrides] = useState(apiConfig?.overrideConfig?.nodes ?? null)
+    const [variableOverrides, setVariableOverrides] = useState(apiConfig?.overrideConfig?.variables ?? [])
 
     const getAllAPIKeysApi = useApi(apiKeyApi.getAllAPIKeys)
     const updateChatflowApi = useApi(chatflowsApi.updateChatflow)
     const getIsChatflowStreamingApi = useApi(chatflowsApi.getIsChatflowStreaming)
     const getConfigApi = useApi(configApi.getConfig)
+    const getAllVariablesApi = useApi(variablesApi.getAllVariables)
+    const isGlobal = useSelector((state) => state.auth.isGlobal)
+    const { hasPermission } = useAuth()
+
+    // Memoize keyOptions to prevent recreation on hover
+    const keyOptions = useMemo(() => {
+        if (!getAllAPIKeysApi.data) return []
+
+        const options = [
+            {
+                label: 'No Authorization',
+                name: ''
+            }
+        ]
+
+        for (const key of getAllAPIKeysApi.data) {
+            options.push({
+                label: key.keyName,
+                name: key.id
+            })
+        }
+
+        if (isGlobal || hasPermission('apikeys:create')) {
+            options.push({
+                label: '- Add New Key -',
+                name: 'addnewkey'
+            })
+        }
+
+        return options
+    }, [getAllAPIKeysApi.data, isGlobal, hasPermission])
 
     const onCheckBoxChanged = (newVal) => {
         setCheckbox(newVal)
         if (newVal) {
             getConfigApi.request(dialogProps.chatflowid)
+            getAllVariablesApi.request()
         }
     }
 
@@ -112,7 +177,8 @@ const APICodeDialog = ({ show, dialogProps, onCancel }) => {
             return
         }
         setChatflowApiKeyId(keyValue)
-        setSelectedApiKey(apiKeys.find((key) => key.id === keyValue))
+        const selectedKey = apiKeys.find((key) => key.id === keyValue)
+        setSelectedApiKey(selectedKey || {})
         const updateBody = {
             apikeyid: keyValue
         }
@@ -121,9 +187,12 @@ const APICodeDialog = ({ show, dialogProps, onCancel }) => {
 
     const groupByNodeLabel = (nodes) => {
         const result = {}
+        const newNodeOverrides = {}
+        const seenNodes = new Set()
 
         nodes.forEach((item) => {
             const { node, nodeId, label, name, type } = item
+            seenNodes.add(node)
 
             if (!result[node]) {
                 result[node] = {
@@ -132,12 +201,23 @@ const APICodeDialog = ({ show, dialogProps, onCancel }) => {
                 }
             }
 
+            if (!newNodeOverrides[node]) {
+                // If overrideConfigStatus is true, copy existing config for this node
+                newNodeOverrides[node] = overrideConfigStatus ? [...(nodeOverrides[node] || [])] : []
+            }
+
             if (!result[node].nodeIds.includes(nodeId)) result[node].nodeIds.push(nodeId)
 
             const param = { label, name, type }
 
             if (!result[node].params.some((existingParam) => JSON.stringify(existingParam) === JSON.stringify(param))) {
                 result[node].params.push(param)
+                const paramExists = newNodeOverrides[node].some(
+                    (existingParam) => existingParam.label === label && existingParam.name === name && existingParam.type === type
+                )
+                if (!paramExists) {
+                    newNodeOverrides[node].push({ ...param, enabled: false })
+                }
             }
         })
 
@@ -145,8 +225,54 @@ const APICodeDialog = ({ show, dialogProps, onCancel }) => {
         for (const node in result) {
             result[node].nodeIds.sort()
         }
-
         setNodeConfig(result)
+        setNodeOverrides(newNodeOverrides)
+    }
+
+    const groupByVariableLabel = (variables) => {
+        const newVariables = []
+        const seenVariables = new Set()
+
+        variables.forEach((item) => {
+            const { id, name, type } = item
+            seenVariables.add(id)
+
+            const param = { id, name, type }
+
+            // If overrideConfigStatus is true, look for existing variable config
+            // Otherwise, create new default config
+            if (overrideConfigStatus) {
+                const existingVariable = variableOverrides?.find((existingParam) => existingParam.id === id)
+                if (existingVariable) {
+                    if (!newVariables.some((variable) => variable.id === id)) {
+                        newVariables.push({ ...existingVariable })
+                    }
+                } else {
+                    if (!newVariables.some((variable) => variable.id === id)) {
+                        newVariables.push({ ...param, enabled: false })
+                    }
+                }
+            } else {
+                // When no override config exists, create default values
+                if (!newVariables.some((variable) => variable.id === id)) {
+                    newVariables.push({ ...param, enabled: false })
+                }
+            }
+        })
+
+        // If overrideConfigStatus is true, clean up any variables that no longer exist
+        if (overrideConfigStatus && variableOverrides) {
+            variableOverrides.forEach((existingVariable) => {
+                if (!seenVariables.has(existingVariable.id)) {
+                    const index = newVariables.findIndex((newVariable) => newVariable.id === existingVariable.id)
+                    if (index !== -1) {
+                        newVariables.splice(index, 1)
+                    }
+                }
+            })
+        }
+
+        setVariableOverrides(newVariables)
     }
 
     const handleAccordionChange = (nodeLabel) => (event, isExpanded) => {
@@ -165,13 +291,68 @@ const APICodeDialog = ({ show, dialogProps, onCancel }) => {
         if (getConfigApi.data) {
             groupByNodeLabel(getConfigApi.data)
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [getConfigApi.data])
+
+    useEffect(() => {
+        if (getAllVariablesApi.data) {
+            groupByVariableLabel(getAllVariablesApi.data)
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [getAllVariablesApi.data])
 
     const handleChange = (event, newValue) => {
         setValue(newValue)
     }
 
+    const getWebhookCode = (codeLang, apiKey) => {
+        const url = `${baseURL}/api/v1/webhook/${dialogProps.chatflowid}`
+        const sendsBody = webhookMethod !== 'GET' && webhookMethod !== 'DELETE'
+        const isJson = webhookContentType === 'application/json'
+        const sampleBodyJs = isJson ? '{ example: "value" }' : '"example=value"'
+        const sampleBodyPy = isJson ? '{"example": "value"}' : '"example=value"'
+        const sampleBodyCurl = isJson ? '{"example": "value"}' : 'example=value'
+
+        if (codeLang === 'Python') {
+            const headers = [`"Content-Type": "${webhookContentType}"`]
+            if (apiKey) headers.push(`"Authorization": "Bearer ${apiKey}"`)
+            if (webhookEnableAuth) headers.push(`"${webhookSignatureHeader}": "<signature>"`)
+            const bodyArg = sendsBody ? (isJson ? `, json=${sampleBodyPy}` : `, data=${sampleBodyPy}`) : ''
+            return `import requests
+
+API_URL = "${url}"
+headers = {${headers.join(', ')}}
+
+response = requests.${webhookMethod.toLowerCase()}(API_URL, headers=headers${bodyArg})
+print(response.json())
+`
+        } else if (codeLang === 'JavaScript') {
+            const headers = [`"Content-Type": "${webhookContentType}"`]
+            if (apiKey) headers.push(`Authorization: "Bearer ${apiKey}"`)
+            if (webhookEnableAuth) headers.push(`"${webhookSignatureHeader}": "<signature>"`)
+            const bodyLine = sendsBody ? `,\n        body: ${isJson ? `JSON.stringify(${sampleBodyJs})` : sampleBodyJs}` : ''
+            return `const response = await fetch(
+    "${url}",
+    {
+        method: "${webhookMethod}",
+        headers: { ${headers.join(', ')} }${bodyLine}
+    }
+);
+const result = await response.json();
+console.log(result);
+`
+        } else if (codeLang === 'cURL') {
+            const parts = [`curl ${url}`, `-X ${webhookMethod}`, `-H "Content-Type: ${webhookContentType}"`]
+            if (apiKey) parts.push(`-H "Authorization: Bearer ${apiKey}"`)
+            if (webhookEnableAuth) parts.push(`-H "${webhookSignatureHeader}: <signature>"`)
+            if (sendsBody) parts.push(`-d '${sampleBodyCurl}'`)
+            return parts.join(' \\\n     ')
+        }
+        return ''
+    }
+
     const getCode = (codeLang) => {
+        if (isWebhookFlow) return getWebhookCode(codeLang, null)
         if (codeLang === 'Python') {
             return `import requests
 
@@ -180,7 +361,7 @@ API_URL = "${baseURL}/api/v1/prediction/${dialogProps.chatflowid}"
 def query(payload):
     response = requests.post(API_URL, json=payload)
     return response.json()
-    
+
 output = query({
     "question": "Hey, how are you?",
 })
@@ -215,6 +396,7 @@ query({"question": "Hey, how are you?"}).then((response) => {
     }
 
     const getCodeWithAuthorization = (codeLang) => {
+        if (isWebhookFlow) return getWebhookCode(codeLang, selectedApiKey?.apiKey)
         if (codeLang === 'Python') {
             return `import requests
 
@@ -499,26 +681,63 @@ query({
     }
 
     const getMultiConfigCodeWithFormData = (codeLang) => {
-        if (codeLang === 'Python') {
-            return `# Specify multiple values for a config parameter by specifying the node id
+        if (dialogProps.isAgentflowV2) {
+            if (codeLang === 'Python') {
+                return `# Specify multiple values for a config parameter by specifying the node id
+body_data = {
+    "agentModelConfig": {
+        "agentAgentflow_0": {
+            "openAIApiKey": "sk-my-openai-1st-key"
+        },
+        "agentAgentflow_1": {
+            "openAIApiKey": "sk-my-openai-2nd-key"
+        }
+    }
+}`
+            } else if (codeLang === 'JavaScript') {
+                return `// Specify multiple values for a config parameter by specifying the node id
+formData.append("agentModelConfig[agentAgentflow_0][openAIApiKey]", "sk-my-openai-1st-key")
+formData.append("agentModelConfig[agentAgentflow_1][openAIApiKey]", "sk-my-openai-2nd-key")`
+            } else if (codeLang === 'cURL') {
+                return `-F "agentModelConfig[agentAgentflow_0][openAIApiKey]=sk-my-openai-1st-key" \\
+-F "agentModelConfig[agentAgentflow_1][openAIApiKey]=sk-my-openai-2nd-key" \\`
+            }
+        } else {
+            if (codeLang === 'Python') {
+                return `# Specify multiple values for a config parameter by specifying the node id
 body_data = {
     "openAIApiKey": {
         "chatOpenAI_0": "sk-my-openai-1st-key",
         "openAIEmbeddings_0": "sk-my-openai-2nd-key"
     }
 }`
-        } else if (codeLang === 'JavaScript') {
-            return `// Specify multiple values for a config parameter by specifying the node id
+            } else if (codeLang === 'JavaScript') {
+                return `// Specify multiple values for a config parameter by specifying the node id
 formData.append("openAIApiKey[chatOpenAI_0]", "sk-my-openai-1st-key")
 formData.append("openAIApiKey[openAIEmbeddings_0]", "sk-my-openai-2nd-key")`
-        } else if (codeLang === 'cURL') {
-            return `-F "openAIApiKey[chatOpenAI_0]=sk-my-openai-1st-key" \\
+            } else if (codeLang === 'cURL') {
+                return `-F "openAIApiKey[chatOpenAI_0]=sk-my-openai-1st-key" \\
 -F "openAIApiKey[openAIEmbeddings_0]=sk-my-openai-2nd-key" \\`
+            }
         }
     }
 
     const getMultiConfigCode = () => {
-        return `{
+        if (dialogProps.isAgentflowV2) {
+            return `{
+    "overrideConfig": {
+        "agentModelConfig": {
+            "agentAgentflow_0": {
+                "openAIApiKey": "sk-my-openai-1st-key"
+            },
+            "agentAgentflow_1": {
+                "openAIApiKey": "sk-my-openai-2nd-key"
+            }
+        }
+    }
+}`
+        } else {
+            return `{
     "overrideConfig": {
         "openAIApiKey": {
             "chatOpenAI_0": "sk-my-openai-1st-key",
@@ -526,27 +745,11 @@ formData.append("openAIApiKey[openAIEmbeddings_0]", "sk-my-openai-2nd-key")`
         }
     }
 }`
+        }
     }
 
     useEffect(() => {
         if (getAllAPIKeysApi.data) {
-            const options = [
-                {
-                    label: 'No Authorization',
-                    name: ''
-                }
-            ]
-            for (const key of getAllAPIKeysApi.data) {
-                options.push({
-                    label: key.keyName,
-                    name: key.id
-                })
-            }
-            options.push({
-                label: '- Add New Key -',
-                name: 'addnewkey'
-            })
-            setKeyOptions(options)
             setAPIKeys(getAllAPIKeysApi.data)
 
             if (dialogProps.chatflowApiKeyId) {
@@ -578,172 +781,314 @@ formData.append("openAIApiKey[openAIEmbeddings_0]", "sk-my-openai-2nd-key")`
                 {dialogProps.title}
             </DialogTitle>
             <DialogContent>
-                <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center' }}>
-                    <div style={{ flex: 80 }}>
-                        <Tabs value={value} onChange={handleChange} aria-label='tabs'>
-                            {codes.map((codeLang, index) => (
-                                <Tab
-                                    icon={
-                                        <img style={{ objectFit: 'cover', height: 15, width: 'auto' }} src={getSVG(codeLang)} alt='code' />
-                                    }
-                                    iconPosition='start'
-                                    key={index}
-                                    label={codeLang}
-                                    {...a11yProps(index)}
-                                ></Tab>
-                            ))}
-                        </Tabs>
+                {isScheduleFlow ? (
+                    <div
+                        style={{
+                            display: 'flex',
+                            flexDirection: 'row',
+                            alignItems: 'flex-start',
+                            borderRadius: 10,
+                            background: 'rgb(254,252,191)',
+                            padding: 12
+                        }}
+                    >
+                        <IconExclamationCircle size={28} color='rgb(116,66,16)' style={{ flexShrink: 0 }} />
+                        <span style={{ color: 'rgb(116,66,16)', marginLeft: 10, fontWeight: 500 }}>
+                            This flow is configured as a <b>Scheduled Trigger</b>. It is fired automatically by the in-process scheduler on
+                            its cron schedule and cannot be invoked via the prediction API. To call this flow from an API, change the Start
+                            node Input Type to <b>Chat Input</b>, <b>Form Input</b>, or <b>Webhook Trigger</b>.
+                        </span>
                     </div>
-                    <div style={{ flex: 20 }}>
-                        <Dropdown
-                            name='SelectKey'
-                            disableClearable={true}
-                            options={keyOptions}
-                            onSelect={(newValue) => onApiKeySelected(newValue)}
-                            value={dialogProps.chatflowApiKeyId ?? chatflowApiKeyId ?? 'Choose an API key'}
-                        />
-                    </div>
-                </div>
-                <div style={{ marginTop: 10 }}></div>
-                {codes.map((codeLang, index) => (
-                    <TabPanel key={index} value={value} index={index}>
-                        {(codeLang === 'Embed' || codeLang === 'Share Chatbot') && chatflowApiKeyId && (
-                            <>
-                                <p>You cannot use API key while embedding/sharing chatbot.</p>
-                                <p>
-                                    Please select <b>&quot;No Authorization&quot;</b> from the dropdown at the top right corner.
-                                </p>
-                            </>
+                ) : (
+                    <>
+                        {isWebhookFlow && (
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    borderRadius: 10,
+                                    background: '#d8f3dc',
+                                    padding: 12,
+                                    marginBottom: 16
+                                }}
+                            >
+                                <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center' }}>
+                                    <IconBulb size={28} color='#2d6a4f' />
+                                    <span style={{ color: '#2d6a4f', marginLeft: 10, fontWeight: 500 }}>
+                                        This flow is configured as a <b>Webhook Trigger</b>. Send <b>{webhookMethod}</b> requests to{' '}
+                                        <code>/api/v1/webhook/{dialogProps.chatflowid}</code> with Content-Type{' '}
+                                        <code>{webhookContentType}</code>.
+                                        {webhookEnableAuth && (
+                                            <>
+                                                {' '}
+                                                Each request must include a valid signature in the <code>
+                                                    {webhookSignatureHeader}
+                                                </code>{' '}
+                                                header.
+                                            </>
+                                        )}{' '}
+                                        Response mode: <b>{webhookResponseMode}</b>
+                                        {webhookResponseMode === 'async' && ' (returns 202 immediately, optional callback POST when done)'}
+                                        {webhookResponseMode === 'stream' && ' (Server-Sent Events stream)'}.
+                                    </span>
+                                </div>
+                            </div>
                         )}
-                        {codeLang === 'Embed' && !chatflowApiKeyId && <EmbedChat chatflowid={dialogProps.chatflowid} />}
-                        {codeLang !== 'Embed' && codeLang !== 'Share Chatbot' && codeLang !== 'Configuration' && (
-                            <>
-                                <CopyBlock
-                                    theme={atomOneDark}
-                                    text={chatflowApiKeyId ? getCodeWithAuthorization(codeLang) : getCode(codeLang)}
-                                    language={getLang(codeLang)}
-                                    showLineNumbers={false}
-                                    wrapLines
-                                />
-                                <CheckboxInput label='Show Input Config' value={checkboxVal} onChange={onCheckBoxChanged} />
-                                {checkboxVal && getConfigApi.data && getConfigApi.data.length > 0 && (
+                        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center' }}>
+                            <div style={{ flex: 80 }}>
+                                <Tabs value={value} onChange={handleChange} aria-label='tabs'>
+                                    {codes.map((codeLang, index) => (
+                                        <Tab
+                                            icon={
+                                                <img
+                                                    style={{ objectFit: 'cover', height: 15, width: 'auto' }}
+                                                    src={getSVG(codeLang)}
+                                                    alt='code'
+                                                />
+                                            }
+                                            iconPosition='start'
+                                            key={index}
+                                            label={codeLang}
+                                            {...a11yProps(index)}
+                                        ></Tab>
+                                    ))}
+                                </Tabs>
+                            </div>
+                            <div style={{ flex: 20 }}>
+                                <Available permission={'chatflows:update,agentflows:update'}>
+                                    <Dropdown
+                                        name='SelectKey'
+                                        disableClearable={true}
+                                        options={keyOptions}
+                                        onSelect={(newValue) => onApiKeySelected(newValue)}
+                                        value={dialogProps.chatflowApiKeyId ?? chatflowApiKeyId ?? 'Choose an API key'}
+                                    />
+                                </Available>
+                            </div>
+                        </div>
+                        <div style={{ marginTop: 10 }}></div>
+                        {codes.map((codeLang, index) => (
+                            <TabPanel key={index} value={value} index={index}>
+                                {(codeLang === 'Embed' || codeLang === 'Share Chatbot') && chatflowApiKeyId && (
                                     <>
-                                        {Object.keys(nodeConfig)
-                                            .sort()
-                                            .map((nodeLabel) => (
-                                                <Accordion
-                                                    expanded={nodeConfigExpanded[nodeLabel] || false}
-                                                    onChange={handleAccordionChange(nodeLabel)}
-                                                    key={nodeLabel}
-                                                    disableGutters
-                                                >
-                                                    <AccordionSummary
-                                                        expandIcon={<ExpandMoreIcon />}
-                                                        aria-controls={`nodes-accordian-${nodeLabel}`}
-                                                        id={`nodes-accordian-header-${nodeLabel}`}
-                                                    >
-                                                        <Stack flexDirection='row' sx={{ gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
-                                                            <Typography variant='h5'>{nodeLabel}</Typography>
-                                                            {nodeConfig[nodeLabel].nodeIds.length > 0 &&
-                                                                nodeConfig[nodeLabel].nodeIds.map((nodeId, index) => (
-                                                                    <div
-                                                                        key={index}
-                                                                        style={{
-                                                                            display: 'flex',
-                                                                            flexDirection: 'row',
-                                                                            width: 'max-content',
-                                                                            borderRadius: 15,
-                                                                            background: 'rgb(254,252,191)',
-                                                                            padding: 5,
-                                                                            paddingLeft: 10,
-                                                                            paddingRight: 10
-                                                                        }}
-                                                                    >
-                                                                        <span style={{ color: 'rgb(116,66,16)', fontSize: '0.825rem' }}>
-                                                                            {nodeId}
-                                                                        </span>
-                                                                    </div>
-                                                                ))}
-                                                        </Stack>
-                                                    </AccordionSummary>
-                                                    <AccordionDetails>
-                                                        <TableViewOnly
-                                                            rows={nodeConfig[nodeLabel].params}
-                                                            columns={Object.keys(nodeConfig[nodeLabel].params[0]).slice(-3)}
-                                                        />
-                                                    </AccordionDetails>
-                                                </Accordion>
-                                            ))}
+                                        <p>You cannot use API key while embedding/sharing chatbot.</p>
+                                        <p>
+                                            Please select <b>&quot;No Authorization&quot;</b> from the dropdown at the top right corner.
+                                        </p>
+                                    </>
+                                )}
+                                {codeLang === 'Embed' && !chatflowApiKeyId && <EmbedChat chatflowid={dialogProps.chatflowid} />}
+                                {codeLang !== 'Embed' && codeLang !== 'Share Chatbot' && codeLang !== 'Configuration' && (
+                                    <>
                                         <CopyBlock
                                             theme={atomOneDark}
-                                            text={
-                                                chatflowApiKeyId
-                                                    ? dialogProps.isFormDataRequired
-                                                        ? getConfigCodeWithFormDataWithAuth(codeLang, getConfigApi.data)
-                                                        : getConfigCodeWithAuthorization(codeLang, getConfigApi.data)
-                                                    : dialogProps.isFormDataRequired
-                                                    ? getConfigCodeWithFormData(codeLang, getConfigApi.data)
-                                                    : getConfigCode(codeLang, getConfigApi.data)
-                                            }
+                                            text={chatflowApiKeyId ? getCodeWithAuthorization(codeLang) : getCode(codeLang)}
                                             language={getLang(codeLang)}
                                             showLineNumbers={false}
                                             wrapLines
                                         />
-                                        <div
-                                            style={{
-                                                display: 'flex',
-                                                flexDirection: 'column',
-                                                borderRadius: 10,
-                                                background: '#d8f3dc',
-                                                padding: 10,
-                                                marginTop: 10,
-                                                marginBottom: 10
-                                            }}
-                                        >
-                                            <div
-                                                style={{
-                                                    display: 'flex',
-                                                    flexDirection: 'row',
-                                                    alignItems: 'center'
-                                                }}
-                                            >
-                                                <IconBulb size={30} color='#2d6a4f' />
-                                                <span style={{ color: '#2d6a4f', marginLeft: 10, fontWeight: 500 }}>
-                                                    You can also specify multiple values for a config parameter by specifying the node id
-                                                </span>
-                                            </div>
-                                            <div style={{ padding: 10 }}>
+                                        <CheckboxInput label='Show Override Config' value={checkboxVal} onChange={onCheckBoxChanged} />
+                                        {checkboxVal && getConfigApi.data && getConfigApi.data.length > 0 && (
+                                            <>
+                                                <Typography sx={{ mt: 2 }}>
+                                                    You can override existing input configuration of the chatflow with overrideConfig
+                                                    property.
+                                                </Typography>
+                                                <div
+                                                    style={{
+                                                        display: 'flex',
+                                                        flexDirection: 'column',
+                                                        borderRadius: 10,
+                                                        background: 'rgb(254,252,191)',
+                                                        padding: 10,
+                                                        marginTop: 10,
+                                                        marginBottom: 10
+                                                    }}
+                                                >
+                                                    <div
+                                                        style={{
+                                                            display: 'flex',
+                                                            flexDirection: 'row',
+                                                            alignItems: 'center'
+                                                        }}
+                                                    >
+                                                        <IconExclamationCircle size={30} color='rgb(116,66,16)' />
+                                                        <span style={{ color: 'rgb(116,66,16)', marginLeft: 10, fontWeight: 500 }}>
+                                                            {
+                                                                'For security reason, override config is disabled by default. You can change this by going into Chatflow Configuration -> Security tab, and enable the property you want to override.'
+                                                            }
+                                                            &nbsp;Refer{' '}
+                                                            <a
+                                                                rel='noreferrer'
+                                                                target='_blank'
+                                                                href='https://docs.flowiseai.com/using-flowise/prediction#configuration-override'
+                                                            >
+                                                                here
+                                                            </a>{' '}
+                                                            for more details
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                                <Stack direction='column' spacing={2} sx={{ width: '100%', my: 2 }}>
+                                                    <Card sx={{ borderColor: theme.palette.primary[200] + 75, p: 2 }} variant='outlined'>
+                                                        <Stack
+                                                            sx={{ mt: 1, mb: 2, ml: 1, alignItems: 'center' }}
+                                                            direction='row'
+                                                            spacing={2}
+                                                        >
+                                                            <IconBox />
+                                                            <Typography variant='h4'>Nodes</Typography>
+                                                        </Stack>
+                                                        {Object.keys(nodeConfig)
+                                                            .sort()
+                                                            .map((nodeLabel) => (
+                                                                <Accordion
+                                                                    expanded={nodeConfigExpanded[nodeLabel] || false}
+                                                                    onChange={handleAccordionChange(nodeLabel)}
+                                                                    key={nodeLabel}
+                                                                    disableGutters
+                                                                >
+                                                                    <AccordionSummary
+                                                                        expandIcon={<ExpandMoreIcon />}
+                                                                        aria-controls={`nodes-accordian-${nodeLabel}`}
+                                                                        id={`nodes-accordian-header-${nodeLabel}`}
+                                                                    >
+                                                                        <Stack
+                                                                            flexDirection='row'
+                                                                            sx={{ gap: 2, alignItems: 'center', flexWrap: 'wrap' }}
+                                                                        >
+                                                                            <Typography variant='h5'>{nodeLabel}</Typography>
+                                                                            {nodeConfig[nodeLabel].nodeIds.length > 0 &&
+                                                                                nodeConfig[nodeLabel].nodeIds.map((nodeId, index) => (
+                                                                                    <div
+                                                                                        key={index}
+                                                                                        style={{
+                                                                                            display: 'flex',
+                                                                                            flexDirection: 'row',
+                                                                                            width: 'max-content',
+                                                                                            borderRadius: 15,
+                                                                                            background: 'rgb(254,252,191)',
+                                                                                            padding: 5,
+                                                                                            paddingLeft: 10,
+                                                                                            paddingRight: 10
+                                                                                        }}
+                                                                                    >
+                                                                                        <span
+                                                                                            style={{
+                                                                                                color: 'rgb(116,66,16)',
+                                                                                                fontSize: '0.825rem'
+                                                                                            }}
+                                                                                        >
+                                                                                            {nodeId}
+                                                                                        </span>
+                                                                                    </div>
+                                                                                ))}
+                                                                        </Stack>
+                                                                    </AccordionSummary>
+                                                                    <AccordionDetails>
+                                                                        <TableViewOnly
+                                                                            rows={nodeOverrides[nodeLabel]}
+                                                                            columns={
+                                                                                nodeOverrides[nodeLabel].length > 0
+                                                                                    ? Object.keys(nodeOverrides[nodeLabel][0]).filter(
+                                                                                          (key) => key !== 'schema'
+                                                                                      )
+                                                                                    : []
+                                                                            }
+                                                                        />
+                                                                    </AccordionDetails>
+                                                                </Accordion>
+                                                            ))}
+                                                    </Card>
+                                                    <Card sx={{ borderColor: theme.palette.primary[200] + 75, p: 2 }} variant='outlined'>
+                                                        <Stack
+                                                            sx={{ mt: 1, mb: 2, ml: 1, alignItems: 'center' }}
+                                                            direction='row'
+                                                            spacing={2}
+                                                        >
+                                                            <IconVariable />
+                                                            <Typography variant='h4'>Variables</Typography>
+                                                        </Stack>
+                                                        <TableViewOnly rows={variableOverrides} columns={['name', 'type', 'enabled']} />
+                                                    </Card>
+                                                </Stack>
                                                 <CopyBlock
                                                     theme={atomOneDark}
                                                     text={
-                                                        dialogProps.isFormDataRequired
-                                                            ? getMultiConfigCodeWithFormData(codeLang)
-                                                            : getMultiConfigCode()
+                                                        chatflowApiKeyId
+                                                            ? dialogProps.isFormDataRequired
+                                                                ? getConfigCodeWithFormDataWithAuth(codeLang, getConfigApi.data)
+                                                                : getConfigCodeWithAuthorization(codeLang, getConfigApi.data)
+                                                            : dialogProps.isFormDataRequired
+                                                            ? getConfigCodeWithFormData(codeLang, getConfigApi.data)
+                                                            : getConfigCode(codeLang, getConfigApi.data)
                                                     }
                                                     language={getLang(codeLang)}
                                                     showLineNumbers={false}
                                                     wrapLines
                                                 />
-                                            </div>
-                                        </div>
+                                                <div
+                                                    style={{
+                                                        display: 'flex',
+                                                        flexDirection: 'column',
+                                                        borderRadius: 10,
+                                                        background: '#d8f3dc',
+                                                        padding: 10,
+                                                        marginTop: 10,
+                                                        marginBottom: 10
+                                                    }}
+                                                >
+                                                    <div
+                                                        style={{
+                                                            display: 'flex',
+                                                            flexDirection: 'row',
+                                                            alignItems: 'center'
+                                                        }}
+                                                    >
+                                                        <IconBulb size={30} color='#2d6a4f' />
+                                                        <span style={{ color: '#2d6a4f', marginLeft: 10, fontWeight: 500 }}>
+                                                            You can also specify multiple values for a config parameter by specifying the
+                                                            node id
+                                                        </span>
+                                                    </div>
+                                                    <div style={{ padding: 10 }}>
+                                                        <CopyBlock
+                                                            theme={atomOneDark}
+                                                            text={
+                                                                dialogProps.isFormDataRequired
+                                                                    ? getMultiConfigCodeWithFormData(codeLang)
+                                                                    : getMultiConfigCode()
+                                                            }
+                                                            language={getLang(codeLang)}
+                                                            showLineNumbers={false}
+                                                            wrapLines
+                                                        />
+                                                    </div>
+                                                </div>
+                                            </>
+                                        )}
+                                        {getIsChatflowStreamingApi.data?.isStreaming && (
+                                            <p>
+                                                Read&nbsp;
+                                                <a
+                                                    rel='noreferrer'
+                                                    target='_blank'
+                                                    href='https://docs.flowiseai.com/using-flowise/streaming'
+                                                >
+                                                    here
+                                                </a>
+                                                &nbsp;on how to stream response back to application
+                                            </p>
+                                        )}
                                     </>
                                 )}
-                                {getIsChatflowStreamingApi.data?.isStreaming && (
-                                    <p>
-                                        Read&nbsp;
-                                        <a rel='noreferrer' target='_blank' href='https://docs.flowiseai.com/using-flowise/streaming'>
-                                            here
-                                        </a>
-                                        &nbsp;on how to stream response back to application
-                                    </p>
+                                {codeLang === 'Share Chatbot' && !chatflowApiKeyId && (
+                                    <ShareChatbot isSessionMemory={dialogProps.isSessionMemory} isAgentCanvas={dialogProps.isAgentCanvas} />
                                 )}
-                            </>
-                        )}
-                        {codeLang === 'Share Chatbot' && !chatflowApiKeyId && (
-                            <ShareChatbot isSessionMemory={dialogProps.isSessionMemory} isAgentCanvas={dialogProps.isAgentCanvas} />
-                        )}
-                    </TabPanel>
-                ))}
+                            </TabPanel>
+                        ))}
+                    </>
+                )}
             </DialogContent>
         </Dialog>
     ) : null

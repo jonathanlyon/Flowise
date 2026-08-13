@@ -1,4 +1,4 @@
-import { ConversationChain } from 'langchain/chains'
+import { ConversationChain } from '@langchain/classic/chains'
 import {
     ChatPromptTemplate,
     HumanMessagePromptTemplate,
@@ -8,7 +8,6 @@ import {
     PromptTemplate
 } from '@langchain/core/prompts'
 import { RunnableSequence } from '@langchain/core/runnables'
-import { StringOutputParser } from '@langchain/core/output_parsers'
 import { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import { HumanMessage } from '@langchain/core/messages'
 import { ConsoleCallbackHandler as LCConsoleCallbackHandler } from '@langchain/core/tracers/console'
@@ -17,16 +16,16 @@ import { formatResponse } from '../../outputparsers/OutputParserHelpers'
 import { addImagesToMessages, llmSupportsVision } from '../../../src/multiModalUtils'
 import { ChatOpenAI } from '../../chatmodels/ChatOpenAI/FlowiseChatOpenAI'
 import {
-    IVisionChatModal,
     FlowiseMemory,
     ICommonObject,
     INode,
     INodeData,
     INodeParams,
-    MessageContentImageUrl
+    MessageContentImageUrl,
+    IServerSideEventStreamer
 } from '../../../src/Interface'
 import { ConsoleCallbackHandler, CustomChainHandler, additionalCallbacks } from '../../../src/handler'
-import { getBaseClasses, handleEscapeCharacters } from '../../../src/utils'
+import { getBaseClasses, handleEscapeCharacters, transformBracesWithColon, createTextOnlyOutputParser } from '../../../src/utils'
 
 let systemMessage = `The following is a friendly conversation between a human and an AI. The AI is talkative and provides lots of specific details from its context. If the AI does not know the answer to a question, it truthfully says it does not know.`
 const inputKey = 'input'
@@ -114,18 +113,24 @@ class ConversationChain_Chains implements INode {
         const chain = await prepareChain(nodeData, options, this.sessionId)
         const moderations = nodeData.inputs?.inputModeration as Moderation[]
 
+        const shouldStreamResponse = options.shouldStreamResponse
+        const sseStreamer: IServerSideEventStreamer = options.sseStreamer as IServerSideEventStreamer
+        const chatId = options.chatId
+
         if (moderations && moderations.length > 0) {
             try {
                 // Use the output of the moderation chain as input for the LLM chain
                 input = await checkInputs(moderations, input)
             } catch (e) {
                 await new Promise((resolve) => setTimeout(resolve, 500))
-                streamResponse(options.socketIO && options.socketIOClientId, e.message, options.socketIO, options.socketIOClientId)
+                if (options.shouldStreamResponse) {
+                    streamResponse(options.sseStreamer, options.chatId, e.message)
+                }
                 return formatResponse(e.message)
             }
         }
 
-        const loggerHandler = new ConsoleCallbackHandler(options.logger)
+        const loggerHandler = new ConsoleCallbackHandler(options.logger, options?.orgId)
         const additionalCallback = await additionalCallbacks(nodeData, options)
 
         let res = ''
@@ -135,8 +140,8 @@ class ConversationChain_Chains implements INode {
             callbacks.push(new LCConsoleCallbackHandler())
         }
 
-        if (options.socketIO && options.socketIOClientId) {
-            const handler = new CustomChainHandler(options.socketIO, options.socketIOClientId)
+        if (shouldStreamResponse) {
+            const handler = new CustomChainHandler(sseStreamer, chatId)
             callbacks.push(handler)
             res = await chain.invoke({ input }, { callbacks })
         } else {
@@ -163,7 +168,8 @@ class ConversationChain_Chains implements INode {
 
 const prepareChatPrompt = (nodeData: INodeData, humanImageMessages: MessageContentImageUrl[]) => {
     const memory = nodeData.inputs?.memory as FlowiseMemory
-    const prompt = nodeData.inputs?.systemMessagePrompt as string
+    let prompt = nodeData.inputs?.systemMessagePrompt as string
+    prompt = transformBracesWithColon(prompt)
     const chatPromptTemplate = nodeData.inputs?.chatPromptTemplate as ChatPromptTemplate
     let model = nodeData.inputs?.model as BaseChatModel
 
@@ -225,13 +231,6 @@ const prepareChain = async (nodeData: INodeData, options: ICommonObject, session
     let messageContent: MessageContentImageUrl[] = []
     if (llmSupportsVision(model)) {
         messageContent = await addImagesToMessages(nodeData, options, model.multiModalOption)
-        const visionChatModel = model as IVisionChatModal
-        if (messageContent?.length) {
-            visionChatModel.setVisionModel()
-        } else {
-            // revert to previous values if image upload is empty
-            visionChatModel.revertToOriginalModel()
-        }
     }
 
     const chatPrompt = prepareChatPrompt(nodeData, messageContent)
@@ -260,7 +259,7 @@ const prepareChain = async (nodeData: INodeData, options: ICommonObject, session
         },
         prepareChatPrompt(nodeData, messageContent),
         model,
-        new StringOutputParser()
+        createTextOnlyOutputParser()
     ])
 
     return conversationChain

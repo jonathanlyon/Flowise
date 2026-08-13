@@ -43,6 +43,9 @@ import HistoryEmptySVG from '@/assets/images/upsert_history_empty.svg'
 import vectorstoreApi from '@/api/vectorstore'
 import useApi from '@/hooks/useApi'
 
+// Rbac
+import { Available } from '@/ui-component/rbac/available'
+
 // Store
 import { HIDE_CANVAS_DIALOG, SHOW_CANVAS_DIALOG } from '@/store/actions'
 import { baseURL } from '@/store/constant'
@@ -197,7 +200,7 @@ const UpsertHistoryDialog = ({ show, dialogProps, onCancel }) => {
     const closeSnackbar = (...args) => dispatch(closeSnackbarAction(...args))
 
     const [chatflowUpsertHistory, setChatflowUpsertHistory] = useState([])
-    const [startDate, setStartDate] = useState(new Date().setMonth(new Date().getMonth() - 1))
+    const [startDate, setStartDate] = useState(new Date(new Date().setMonth(new Date().getMonth() - 1)))
     const [endDate, setEndDate] = useState(new Date())
     const [selected, setSelected] = useState([])
 
@@ -211,17 +214,21 @@ const UpsertHistoryDialog = ({ show, dialogProps, onCancel }) => {
     }
 
     const onStartDateSelected = (date) => {
-        setStartDate(date)
+        const updatedDate = new Date(date)
+        updatedDate.setHours(0, 0, 0, 0)
+        setStartDate(updatedDate)
         getUpsertHistoryApi.request(dialogProps.chatflow.id, {
-            startDate: date,
+            startDate: updatedDate,
             endDate: endDate
         })
     }
 
     const onEndDateSelected = (date) => {
-        setEndDate(date)
+        const updatedDate = new Date(date)
+        updatedDate.setHours(23, 59, 59, 999)
+        setEndDate(updatedDate)
         getUpsertHistoryApi.request(dialogProps.chatflow.id, {
-            endDate: date,
+            endDate: updatedDate,
             startDate: startDate
         })
     }
@@ -246,7 +253,7 @@ const UpsertHistoryDialog = ({ show, dialogProps, onCancel }) => {
         try {
             await vectorstoreApi.deleteUpsertHistory(selected)
             enqueueSnackbar({
-                message: 'Succesfully deleted upsert history',
+                message: 'Successfully deleted upsert history',
                 options: {
                     key: new Date().getTime() + Math.random(),
                     variant: 'success',
@@ -275,6 +282,7 @@ const UpsertHistoryDialog = ({ show, dialogProps, onCancel }) => {
                     )
                 }
             })
+            setSelected([])
         }
     }
 
@@ -293,7 +301,7 @@ const UpsertHistoryDialog = ({ show, dialogProps, onCancel }) => {
 
         return () => {
             setChatflowUpsertHistory([])
-            setStartDate(new Date().setMonth(new Date().getMonth() - 1))
+            setStartDate(new Date(new Date().setMonth(new Date().getMonth() - 1)))
             setEndDate(new Date())
         }
 
@@ -347,15 +355,17 @@ const UpsertHistoryDialog = ({ show, dialogProps, onCancel }) => {
                         </div>
                     </div>
                     {selected.length > 0 && (
-                        <Button
-                            sx={{ mt: 1, mb: 2 }}
-                            variant='outlined'
-                            onClick={handleRemoveHistory}
-                            color='error'
-                            startIcon={<IconTrash />}
-                        >
-                            Delete {selected.length} {selected.length === 1 ? 'row' : 'rows'}
-                        </Button>
+                        <Available permission='chatflows:update'>
+                            <Button
+                                sx={{ mt: 1, mb: 2 }}
+                                variant='outlined'
+                                onClick={handleRemoveHistory}
+                                color='error'
+                                startIcon={<IconTrash />}
+                            >
+                                Delete {selected.length} {selected.length === 1 ? 'row' : 'rows'}
+                            </Button>
+                        </Available>
                     )}
                     {chatflowUpsertHistory.length <= 0 && (
                         <Stack sx={{ alignItems: 'center', justifyContent: 'center' }} flexDirection='column'>

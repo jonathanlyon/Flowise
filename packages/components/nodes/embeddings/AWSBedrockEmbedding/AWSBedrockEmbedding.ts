@@ -1,7 +1,8 @@
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime'
-import { BedrockEmbeddings, BedrockEmbeddingsParams } from '@langchain/community/embeddings/bedrock'
+import { BedrockEmbeddings, BedrockEmbeddingsParams } from '@langchain/aws'
 import { ICommonObject, INode, INodeData, INodeOptionsValue, INodeParams } from '../../../src/Interface'
-import { getBaseClasses, getCredentialData, getCredentialParam } from '../../../src/utils'
+import { getBaseClasses } from '../../../src/utils'
+import { getAWSCredentialConfig } from '../../../src/awsToolsUtils'
 import { MODEL_TYPE, getModels, getRegions } from '../../../src/modelLoader'
 
 class AWSBedrockEmbedding_Embeddings implements INode {
@@ -17,9 +18,9 @@ class AWSBedrockEmbedding_Embeddings implements INode {
     inputs: INodeParams[]
 
     constructor() {
-        this.label = 'AWS Bedrock Embeddings'
+        this.label = 'AWS Bedrock Embedding'
         this.name = 'AWSBedrockEmbeddings'
-        this.version = 5.0
+        this.version = 5.1
         this.type = 'AWSBedrockEmbeddings'
         this.icon = 'aws.svg'
         this.category = 'Embeddings'
@@ -55,6 +56,14 @@ class AWSBedrockEmbedding_Embeddings implements INode {
                 optional: true
             },
             {
+                label: 'Custom Endpoint Host',
+                name: 'endpointHost',
+                type: 'string',
+                description:
+                    'Custom endpoint host to use for the model. Provide the hostname without scheme. If provided, will override the default endpoint host.',
+                optional: true
+            },
+            {
                 label: 'Cohere Input Type',
                 name: 'inputType',
                 type: 'options',
@@ -83,6 +92,24 @@ class AWSBedrockEmbedding_Embeddings implements INode {
                     }
                 ],
                 optional: true
+            },
+            {
+                label: 'Batch Size',
+                name: 'batchSize',
+                description: 'Documents batch size to send to AWS API for Titan model embeddings. Used to avoid throttling.',
+                type: 'number',
+                optional: true,
+                default: 50,
+                additionalParams: true
+            },
+            {
+                label: 'Max AWS API retries',
+                name: 'maxRetries',
+                description: 'This will limit the number of AWS API for Titan model embeddings call retries. Used to avoid throttling.',
+                type: 'number',
+                optional: true,
+                default: 5,
+                additionalParams: true
             }
         ]
     }
@@ -101,50 +128,65 @@ class AWSBedrockEmbedding_Embeddings implements INode {
         const iModel = nodeData.inputs?.model as string
         const customModel = nodeData.inputs?.customModel as string
         const inputType = nodeData.inputs?.inputType as string
+        const endpointHost = (nodeData.inputs?.endpointHost as string)?.trim()
+        const effectiveModel = customModel || iModel
+        if (!effectiveModel) throw new Error('Model ID is required')
 
-        if (iModel.startsWith('cohere') && !inputType) {
+        if (effectiveModel.startsWith('cohere') && !inputType) {
             throw new Error('Input Type must be selected for Cohere models.')
         }
 
         const obj: BedrockEmbeddingsParams = {
-            model: customModel ? customModel : iModel,
+            model: effectiveModel,
             region: iRegion
         }
 
-        const credentialData = await getCredentialData(nodeData.credential ?? '', options)
-        if (credentialData && Object.keys(credentialData).length !== 0) {
-            const credentialApiKey = getCredentialParam('awsKey', credentialData, nodeData)
-            const credentialApiSecret = getCredentialParam('awsSecret', credentialData, nodeData)
-            const credentialApiSession = getCredentialParam('awsSession', credentialData, nodeData)
-
-            obj.credentials = {
-                accessKeyId: credentialApiKey,
-                secretAccessKey: credentialApiSecret,
-                sessionToken: credentialApiSession
-            }
+        /**
+         * Long-term credentials specified in embedding configuration are optional.
+         * Bedrock's credential provider falls back to the AWS SDK to fetch
+         * credentials from the running environment.
+         * Supports STS AssumeRole when a Role ARN is configured in the credential.
+         */
+        const credentialConfig = await getAWSCredentialConfig(nodeData, options, iRegion)
+        if (credentialConfig.credentials) {
+            obj.credentials = credentialConfig.credentials
         }
 
-        const client = new BedrockRuntimeClient({
+        const clientConfig: Record<string, any> = {
             region: obj.region,
             credentials: obj.credentials
-        })
+        }
+        if (endpointHost) {
+            // Accept the same host-only contract as the AWS Chat Bedrock node, but tolerate a full URL
+            // so users who paste `https://...` are not broken. AWS SDK v3's BedrockRuntimeClient
+            // requires a full URL (scheme + host) on the `endpoint` option.
+            clientConfig.endpoint = /^https?:\/\//i.test(endpointHost) ? endpointHost : `https://${endpointHost}`
+        }
+        const client = new BedrockRuntimeClient(clientConfig)
+
+        // Share the configured client with BedrockEmbeddings so any code path that doesn't go
+        // through our overridden embedQuery / embedDocuments still uses the custom endpoint
+        // (and credentials/region) we configured above.
+        obj.client = client
 
         const model = new BedrockEmbeddings(obj)
 
         model.embedQuery = async (document: string): Promise<number[]> => {
-            if (iModel.startsWith('cohere')) {
-                const embeddings = await embedTextCohere([document], client, iModel, inputType)
+            if (effectiveModel.startsWith('cohere')) {
+                const embeddings = await embedTextCohere([document], client, effectiveModel, inputType)
                 return embeddings[0]
             } else {
-                return await embedTextTitan(document, client, iModel)
+                return await embedTextTitan(document, client, effectiveModel)
             }
         }
 
         model.embedDocuments = async (documents: string[]): Promise<number[][]> => {
-            if (iModel.startsWith('cohere')) {
-                return await embedTextCohere(documents, client, iModel, inputType)
+            if (effectiveModel.startsWith('cohere')) {
+                return await embedTextCohere(documents, client, effectiveModel, inputType)
             } else {
-                return Promise.all(documents.map((document) => embedTextTitan(document, client, iModel)))
+                const batchSize = nodeData.inputs?.batchSize as number
+                const maxRetries = nodeData.inputs?.maxRetries as number
+                return processInBatches(documents, batchSize, maxRetries, (document) => embedTextTitan(document, client, effectiveModel))
             }
         }
         return model
@@ -193,6 +235,40 @@ const embedTextCohere = async (texts: string[], client: BedrockRuntimeClient, mo
     } catch (e) {
         throw new Error('An invalid response was returned by Bedrock.')
     }
+}
+
+const processInBatches = async (
+    documents: string[],
+    batchSize: number,
+    maxRetries: number,
+    processFunc: (document: string) => Promise<number[]>
+): Promise<number[][]> => {
+    let sleepTime = 0
+    let retryCounter = 0
+    let result: number[][] = []
+    for (let i = 0; i < documents.length; i += batchSize) {
+        let chunk = documents.slice(i, i + batchSize)
+        try {
+            let chunkResult = await Promise.all(chunk.map(processFunc))
+            result.push(...chunkResult)
+            retryCounter = 0
+        } catch (e) {
+            if (retryCounter < maxRetries && e.name.includes('ThrottlingException')) {
+                retryCounter = retryCounter + 1
+                i = i - batchSize
+                sleepTime = sleepTime + 100
+            } else {
+                // Split to distinguish between throttling retry error and other errors in trance
+                if (e.name.includes('ThrottlingException')) {
+                    throw new Error('AWS Bedrock retry limit reached: ' + e)
+                } else {
+                    throw new Error(e)
+                }
+            }
+        }
+        await new Promise((resolve) => setTimeout(resolve, sleepTime))
+    }
+    return result
 }
 
 module.exports = { nodeClass: AWSBedrockEmbedding_Embeddings }

@@ -2,9 +2,17 @@ import { BaseLanguageModel, BaseLanguageModelCallOptions } from '@langchain/core
 import { BaseLLMOutputParser, BaseOutputParser } from '@langchain/core/output_parsers'
 import { HumanMessage } from '@langchain/core/messages'
 import { ChatPromptTemplate, FewShotPromptTemplate, HumanMessagePromptTemplate, PromptTemplate } from '@langchain/core/prompts'
-import { OutputFixingParser } from 'langchain/output_parsers'
-import { LLMChain } from 'langchain/chains'
-import { IVisionChatModal, ICommonObject, INode, INodeData, INodeOutputsValue, INodeParams } from '../../../src/Interface'
+import { OutputFixingParser } from '@langchain/classic/output_parsers'
+import { LLMChain } from '@langchain/classic/chains'
+import {
+    IVisionChatModal,
+    ICommonObject,
+    INode,
+    INodeData,
+    INodeOutputsValue,
+    INodeParams,
+    IServerSideEventStreamer
+} from '../../../src/Interface'
 import { additionalCallbacks, ConsoleCallbackHandler, CustomChainHandler } from '../../../src/handler'
 import { getBaseClasses, handleEscapeCharacters } from '../../../src/utils'
 import { checkInputs, Moderation, streamResponse } from '../../moderation/Moderation'
@@ -159,13 +167,15 @@ const runPrediction = async (
     nodeData: INodeData,
     disableStreaming?: boolean
 ) => {
-    const loggerHandler = new ConsoleCallbackHandler(options.logger)
+    const loggerHandler = new ConsoleCallbackHandler(options.logger, options?.orgId)
     const callbacks = await additionalCallbacks(nodeData, options)
 
-    const isStreaming = !disableStreaming && options.socketIO && options.socketIOClientId
-    const socketIO = isStreaming ? options.socketIO : undefined
-    const socketIOClientId = isStreaming ? options.socketIOClientId : ''
     const moderations = nodeData.inputs?.inputModeration as Moderation[]
+
+    // this is true if the prediction is external and the client has requested streaming='true'
+    const shouldStreamResponse = !disableStreaming && options.shouldStreamResponse
+    const sseStreamer: IServerSideEventStreamer = options.sseStreamer as IServerSideEventStreamer
+    const chatId = options.chatId
 
     if (moderations && moderations.length > 0) {
         try {
@@ -173,7 +183,9 @@ const runPrediction = async (
             input = await checkInputs(moderations, input)
         } catch (e) {
             await new Promise((resolve) => setTimeout(resolve, 500))
-            streamResponse(isStreaming, e.message, socketIO, socketIOClientId)
+            if (shouldStreamResponse) {
+                streamResponse(sseStreamer, chatId, e.message)
+            }
             return formatResponse(e.message)
         }
     }
@@ -189,8 +201,6 @@ const runPrediction = async (
         const visionChatModel = chain.llm as IVisionChatModal
         const messageContent = await addImagesToMessages(nodeData, options, visionChatModel.multiModalOption)
         if (messageContent?.length) {
-            // Change model to gpt-4-vision && max token to higher when using gpt-4-vision
-            visionChatModel.setVisionModel()
             // Add image to the message
             if (chain.prompt instanceof PromptTemplate) {
                 const existingPromptTemplate = chain.prompt.template as string
@@ -226,9 +236,6 @@ const runPrediction = async (
                 // @ts-ignore
                 chain.prompt.examplePrompt = newFewShotPromptTemplate
             }
-        } else {
-            // revert to previous values if image upload is empty
-            visionChatModel.revertToOriginalModel()
         }
     }
 
@@ -237,7 +244,7 @@ const runPrediction = async (
 
         for (const variable of inputVariables) {
             seen.push(variable)
-            if (promptValues[variable]) {
+            if (promptValues[variable] != null) {
                 seen.pop()
             }
         }
@@ -245,8 +252,8 @@ const runPrediction = async (
         if (seen.length === 0) {
             // All inputVariables have fixed values specified
             const options = { ...promptValues }
-            if (isStreaming) {
-                const handler = new CustomChainHandler(socketIO, socketIOClientId)
+            if (shouldStreamResponse) {
+                const handler = new CustomChainHandler(sseStreamer, chatId)
                 const res = await chain.call(options, [loggerHandler, handler, ...callbacks])
                 return formatResponse(res?.text)
             } else {
@@ -261,8 +268,8 @@ const runPrediction = async (
                 ...promptValues,
                 [lastValue]: input
             }
-            if (isStreaming) {
-                const handler = new CustomChainHandler(socketIO, socketIOClientId)
+            if (shouldStreamResponse) {
+                const handler = new CustomChainHandler(sseStreamer, chatId)
                 const res = await chain.call(options, [loggerHandler, handler, ...callbacks])
                 return formatResponse(res?.text)
             } else {
@@ -273,8 +280,9 @@ const runPrediction = async (
             throw new Error(`Please provide Prompt Values for: ${seen.join(', ')}`)
         }
     } else {
-        if (isStreaming) {
-            const handler = new CustomChainHandler(socketIO, socketIOClientId)
+        if (shouldStreamResponse) {
+            const handler = new CustomChainHandler(sseStreamer, chatId)
+
             const res = await chain.run(input, [loggerHandler, handler, ...callbacks])
             return formatResponse(res)
         } else {

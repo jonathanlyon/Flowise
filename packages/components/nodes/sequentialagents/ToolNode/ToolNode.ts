@@ -1,13 +1,22 @@
 import { flatten } from 'lodash'
-import { ICommonObject, IDatabaseEntity, INode, INodeData, INodeParams, ISeqAgentNode, IUsedTool } from '../../../src/Interface'
+import {
+    ICommonObject,
+    IDatabaseEntity,
+    INode,
+    INodeData,
+    INodeParams,
+    ISeqAgentNode,
+    IUsedTool,
+    IStateWithMessages
+} from '../../../src/Interface'
 import { AIMessage, AIMessageChunk, BaseMessage, ToolMessage } from '@langchain/core/messages'
 import { StructuredTool } from '@langchain/core/tools'
 import { RunnableConfig } from '@langchain/core/runnables'
-import { SOURCE_DOCUMENTS_PREFIX } from '../../../src/agents'
+import { ARTIFACTS_PREFIX, SOURCE_DOCUMENTS_PREFIX, TOOL_ARGS_PREFIX } from '../../../src/agents'
 import { Document } from '@langchain/core/documents'
 import { DataSource } from 'typeorm'
-import { MessagesState, RunnableCallable, customGet, getVM } from '../commonUtils'
-import { getVars, prepareSandboxVars } from '../../../src/utils'
+import { MessagesState, RunnableCallable, customGet } from '../commonUtils'
+import { getVars, prepareSandboxVars, executeJavaScriptCode, createCodeExecutionSandbox } from '../../../src/utils'
 import { ChatPromptTemplate } from '@langchain/core/prompts'
 
 const defaultApprovalPrompt = `You are about to execute tool: {tools}. Ask if user want to proceed`
@@ -39,9 +48,9 @@ const howToUseCode = `
             "sourceDocuments": [
                 {
                     "pageContent": "This is the page content",
-                    "metadata": "{foo: var}",
+                    "metadata": "{foo: var}"
                 }
-            ],
+            ]
         }
     ]
     \`\`\`
@@ -55,7 +64,7 @@ const howToUseCode = `
     */
     
     return {
-        "sources": $flow.output[0].sourceDocuments
+        "sources": $flow.output[0].toolOutput
     }
     \`\`\`
 
@@ -80,17 +89,19 @@ const howToUse = `
     |-----------|-----------|
     | user      | john doe  |
 
-2. If you want to use the agent's output as the value to update state, it is available as available as \`$flow.output\` with the following structure (array):
+2. If you want to use the Tool Node's output as the value to update state, it is available as available as \`$flow.output\` with the following structure (array):
     \`\`\`json
     [
         {
-            "content": "Hello! How can I assist you today?",
+            "tool": "tool's name",
+            "toolInput": {},
+            "toolOutput": "tool's output content",
             "sourceDocuments": [
                 {
                     "pageContent": "This is the page content",
-                    "metadata": "{foo: var}",
+                    "metadata": "{foo: var}"
                 }
-            ],
+            ]
         }
     ]
     \`\`\`
@@ -98,7 +109,7 @@ const howToUse = `
     For example:
     | Key          | Value                                     |
     |--------------|-------------------------------------------|
-    | sources      | \`$flow.output[0].sourceDocuments\`       |
+    | sources      | \`$flow.output[0].toolOutput\`       |
 
 3. You can get default flow config, including the current "state":
     - \`$flow.sessionId\`
@@ -136,18 +147,20 @@ class ToolNode_SeqAgents implements INode {
     icon: string
     category: string
     baseClasses: string[]
+    documentation?: string
     credential: INodeParams
     inputs: INodeParams[]
 
     constructor() {
         this.label = 'Tool Node'
         this.name = 'seqToolNode'
-        this.version = 1.0
+        this.version = 2.1
         this.type = 'ToolNode'
         this.icon = 'toolNode.svg'
         this.category = 'Sequential Agents'
         this.description = `Execute tool and return tool's output`
         this.baseClasses = [this.type]
+        this.documentation = 'https://docs.flowiseai.com/using-flowise/agentflows/sequential-agents#id-6.-tool-node'
         this.inputs = [
             {
                 label: 'Tools',
@@ -348,7 +361,7 @@ class ToolNode_SeqAgents implements INode {
     }
 }
 
-class ToolNode<T extends BaseMessage[] | MessagesState> extends RunnableCallable<T, T> {
+class ToolNode<T extends IStateWithMessages | BaseMessage[] | MessagesState> extends RunnableCallable<T, BaseMessage[] | MessagesState> {
     tools: StructuredTool[]
     nodeData: INodeData
     inputQuery: string
@@ -370,11 +383,36 @@ class ToolNode<T extends BaseMessage[] | MessagesState> extends RunnableCallable
         this.options = options
     }
 
-    private async run(input: BaseMessage[] | MessagesState, config: RunnableConfig): Promise<BaseMessage[] | MessagesState> {
-        const message = Array.isArray(input) ? input[input.length - 1] : input.messages[input.messages.length - 1]
+    private async run(input: T, config: RunnableConfig): Promise<BaseMessage[] | MessagesState> {
+        let messages: BaseMessage[]
+
+        // Check if input is an array of BaseMessage[]
+        if (Array.isArray(input)) {
+            messages = input
+        }
+        // Check if input is IStateWithMessages
+        else if ((input as IStateWithMessages).messages) {
+            messages = (input as IStateWithMessages).messages
+        }
+        // Handle MessagesState type
+        else {
+            messages = (input as MessagesState).messages
+        }
+
+        // Get the last message
+        const message = messages[messages.length - 1]
 
         if (message._getType() !== 'ai') {
             throw new Error('ToolNode only accepts AIMessages as input.')
+        }
+
+        // Extract all properties except messages for IStateWithMessages
+        const { messages: _, ...inputWithoutMessages } = Array.isArray(input) ? { messages: input } : input
+        const ChannelsWithoutMessages = {
+            chatId: this.options.chatId,
+            sessionId: this.options.sessionId,
+            input: this.inputQuery,
+            state: inputWithoutMessages
         }
 
         const outputs = await Promise.all(
@@ -383,8 +421,13 @@ class ToolNode<T extends BaseMessage[] | MessagesState> extends RunnableCallable
                 if (tool === undefined) {
                     throw new Error(`Tool ${call.name} not found.`)
                 }
+                if (tool && (tool as any).setFlowObject) {
+                    // @ts-ignore
+                    tool.setFlowObject(ChannelsWithoutMessages)
+                }
                 let output = await tool.invoke(call.args, config)
                 let sourceDocuments: Document[] = []
+                let artifacts = []
                 if (output?.includes(SOURCE_DOCUMENTS_PREFIX)) {
                     const outputArray = output.split(SOURCE_DOCUMENTS_PREFIX)
                     output = outputArray[0]
@@ -395,17 +438,39 @@ class ToolNode<T extends BaseMessage[] | MessagesState> extends RunnableCallable
                         console.error('Error parsing source documents from tool')
                     }
                 }
+                if (output?.includes(ARTIFACTS_PREFIX)) {
+                    const outputArray = output.split(ARTIFACTS_PREFIX)
+                    output = outputArray[0]
+                    try {
+                        artifacts = JSON.parse(outputArray[1])
+                    } catch (e) {
+                        console.error('Error parsing artifacts from tool')
+                    }
+                }
+
+                let toolInput
+                if (typeof output === 'string' && output.includes(TOOL_ARGS_PREFIX)) {
+                    const outputArray = output.split(TOOL_ARGS_PREFIX)
+                    output = outputArray[0]
+                    try {
+                        toolInput = JSON.parse(outputArray[1])
+                    } catch (e) {
+                        console.error('Error parsing tool input from tool')
+                    }
+                }
+
                 return new ToolMessage({
                     name: tool.name,
                     content: typeof output === 'string' ? output : JSON.stringify(output),
                     tool_call_id: call.id!,
                     additional_kwargs: {
                         sourceDocuments,
-                        args: call.args,
+                        artifacts,
+                        args: toolInput ?? call.args,
                         usedTools: [
                             {
                                 tool: tool.name ?? '',
-                                toolInput: call.args,
+                                toolInput: toolInput ?? call.args,
                                 toolOutput: output
                             }
                         ]
@@ -434,7 +499,7 @@ const getReturnOutput = async (
     input: string,
     options: ICommonObject,
     outputs: ToolMessage[],
-    state: BaseMessage[] | MessagesState
+    state: ICommonObject
 ) => {
     const appDataSource = options.appDataSource as DataSource
     const databaseEntities = options.databaseEntities as IDatabaseEntity
@@ -444,14 +509,15 @@ const getReturnOutput = async (
     const updateStateMemory = nodeData.inputs?.updateStateMemory as string
 
     const selectedTab = tabIdentifier ? tabIdentifier.split(`_${nodeData.id}`)[0] : 'updateStateMemoryUI'
-    const variables = await getVars(appDataSource, databaseEntities, nodeData)
+    const variables = await getVars(appDataSource, databaseEntities, nodeData, options)
 
     const reformattedOutput = outputs.map((output) => {
         return {
             tool: output.name,
             toolInput: output.additional_kwargs.args,
             toolOutput: output.content,
-            sourceDocuments: output.additional_kwargs.sourceDocuments
+            sourceDocuments: output.additional_kwargs.sourceDocuments,
+            artifacts: output.additional_kwargs.artifacts
         } as IUsedTool
     })
 
@@ -506,9 +572,11 @@ const getReturnOutput = async (
             throw new Error(e)
         }
     } else if (selectedTab === 'updateStateMemoryCode' && updateStateMemoryCode) {
-        const vm = await getVM(appDataSource, databaseEntities, nodeData, flow)
+        const sandbox = createCodeExecutionSandbox(input, variables, flow)
+
         try {
-            const response = await vm.run(`module.exports = async function() {${updateStateMemoryCode}}()`, __dirname)
+            const response = await executeJavaScriptCode(updateStateMemoryCode, sandbox)
+
             if (typeof response !== 'object') throw new Error('Return output must be an object')
             return response
         } catch (e) {

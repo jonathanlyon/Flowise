@@ -2,11 +2,12 @@ import { DataSourceOptions } from 'typeorm/data-source'
 import { DataSource } from 'typeorm'
 import { BaseLanguageModel } from '@langchain/core/language_models/base'
 import { PromptTemplate, PromptTemplateInput } from '@langchain/core/prompts'
-import { SqlDatabaseChain, SqlDatabaseChainInput, DEFAULT_SQL_DATABASE_PROMPT } from 'langchain/chains/sql_db'
-import { SqlDatabase } from 'langchain/sql_db'
-import { ICommonObject, INode, INodeData, INodeParams } from '../../../src/Interface'
+import { SqlDatabaseChain, SqlDatabaseChainInput, DEFAULT_SQL_DATABASE_PROMPT } from '@langchain/classic/chains/sql_db'
+import { SqlDatabase } from '@langchain/classic/sql_db'
+import { ICommonObject, INode, INodeData, INodeParams, IServerSideEventStreamer } from '../../../src/Interface'
 import { ConsoleCallbackHandler, CustomChainHandler, additionalCallbacks } from '../../../src/handler'
-import { getBaseClasses, getInputVariables } from '../../../src/utils'
+import { getBaseClasses, getInputVariables, transformBracesWithColon } from '../../../src/utils'
+import { assertReadOnlySqlStatement, validateSQLitePath } from '../../../src/validator'
 import { checkInputs, Moderation, streamResponse } from '../../moderation/Moderation'
 import { formatResponse } from '../../outputparsers/OutputParserHelpers'
 
@@ -66,7 +67,9 @@ class SqlDatabaseChain_Chains implements INode {
                 label: 'Connection string or file path (sqlite only)',
                 name: 'url',
                 type: 'string',
-                placeholder: '1270.0.0.1:5432/chinook'
+                placeholder: '127.0.0.1:5432/chinook',
+                warning:
+                    'This chain executes LLM-generated SQL directly against the database. For SQLite, only point this at a trusted, disposable database file — queries are restricted to read-only SELECT/WITH statements, but the underlying file should not be shared with other sensitive data.'
             },
             {
                 label: 'Include Tables',
@@ -166,13 +169,20 @@ class SqlDatabaseChain_Chains implements INode {
         const topK = nodeData.inputs?.topK as number
         const customPrompt = nodeData.inputs?.customPrompt as string
         const moderations = nodeData.inputs?.inputModeration as Moderation[]
+
+        const shouldStreamResponse = options.shouldStreamResponse
+        const sseStreamer: IServerSideEventStreamer = options.sseStreamer as IServerSideEventStreamer
+        const chatId = options.chatId
+
         if (moderations && moderations.length > 0) {
             try {
                 // Use the output of the moderation chain as input for the Sql Database Chain
                 input = await checkInputs(moderations, input)
             } catch (e) {
                 await new Promise((resolve) => setTimeout(resolve, 500))
-                streamResponse(options.socketIO && options.socketIOClientId, e.message, options.socketIO, options.socketIOClientId)
+                if (shouldStreamResponse) {
+                    streamResponse(sseStreamer, chatId, e.message)
+                }
                 return formatResponse(e.message)
             }
         }
@@ -187,11 +197,12 @@ class SqlDatabaseChain_Chains implements INode {
             topK,
             customPrompt
         )
-        const loggerHandler = new ConsoleCallbackHandler(options.logger)
+        const loggerHandler = new ConsoleCallbackHandler(options.logger, options?.orgId)
         const callbacks = await additionalCallbacks(nodeData, options)
 
-        if (options.socketIO && options.socketIOClientId) {
-            const handler = new CustomChainHandler(options.socketIO, options.socketIOClientId, 2)
+        if (shouldStreamResponse) {
+            const handler = new CustomChainHandler(sseStreamer, chatId, 2)
+
             const res = await chain.run(input, [loggerHandler, handler, ...callbacks])
             return res
         } else {
@@ -215,13 +226,24 @@ const getSQLDBChain = async (
         databaseType === 'sqlite'
             ? {
                   type: databaseType,
-                  database: url
+                  database: validateSQLitePath(url)
               }
             : ({
                   type: databaseType,
                   url: url
               } as DataSourceOptions)
     )
+
+    if (databaseType === 'sqlite') {
+        // Restrict every query run against this connection - including langchain's own
+        // schema introspection and the LLM-generated query - to a single read-only
+        // SELECT/WITH statement. See assertReadOnlySqlStatement for why.
+        const originalQuery = datasource.query.bind(datasource)
+        datasource.query = (async (sql: string, parameters?: any[], queryRunner?: any) => {
+            assertReadOnlySqlStatement(sql)
+            return originalQuery(sql, parameters, queryRunner)
+        }) as typeof datasource.query
+    }
 
     const db = await SqlDatabase.fromDataSourceParams({
         appDataSource: datasource,
@@ -238,6 +260,7 @@ const getSQLDBChain = async (
     }
 
     if (customPrompt) {
+        customPrompt = transformBracesWithColon(customPrompt)
         const options: PromptTemplateInput = {
             template: customPrompt,
             inputVariables: getInputVariables(customPrompt)

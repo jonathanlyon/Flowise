@@ -1,8 +1,9 @@
 import { omit } from 'lodash'
 import { ICommonObject, IDocument, INode, INodeData, INodeParams } from '../../../src/Interface'
-import { TextSplitter } from 'langchain/text_splitter'
+import { TextSplitter } from '@langchain/textsplitters'
 import { NotionAPILoader, NotionAPILoaderOptions } from '@langchain/community/document_loaders/web/notionapi'
-import { getCredentialData, getCredentialParam } from '../../../src'
+import { getCredentialData, getCredentialParam, handleEscapeCharacters, INodeOutputsValue } from '../../../src'
+import { applyCompactTableTransformer } from './notionTableFix'
 
 class NotionPage_DocumentLoaders implements INode {
     label: string
@@ -15,11 +16,12 @@ class NotionPage_DocumentLoaders implements INode {
     baseClasses: string[]
     credential: INodeParams
     inputs: INodeParams[]
+    outputs: INodeOutputsValue[]
 
     constructor() {
         this.label = 'Notion Page'
         this.name = 'notionPage'
-        this.version = 1.0
+        this.version = 2.0
         this.type = 'Document'
         this.icon = 'notion-page.svg'
         this.category = 'Document Loaders'
@@ -65,6 +67,20 @@ class NotionPage_DocumentLoaders implements INode {
                 additionalParams: true
             }
         ]
+        this.outputs = [
+            {
+                label: 'Document',
+                name: 'document',
+                description: 'Array of document objects containing metadata and pageContent',
+                baseClasses: [...this.baseClasses, 'json']
+            },
+            {
+                label: 'Text',
+                name: 'text',
+                description: 'Concatenated string from pageContent of documents',
+                baseClasses: ['string', 'json']
+            }
+        ]
     }
 
     async init(nodeData: INodeData, _: string, options: ICommonObject): Promise<any> {
@@ -72,6 +88,7 @@ class NotionPage_DocumentLoaders implements INode {
         const pageId = nodeData.inputs?.pageId as string
         const metadata = nodeData.inputs?.metadata
         const _omitMetadataKeys = nodeData.inputs?.omitMetadataKeys as string
+        const output = nodeData.outputs?.output as string
 
         let omitMetadataKeys: string[] = []
         if (_omitMetadataKeys) {
@@ -81,7 +98,7 @@ class NotionPage_DocumentLoaders implements INode {
         const credentialData = await getCredentialData(nodeData.credential ?? '', options)
         const notionIntegrationToken = getCredentialParam('notionIntegrationToken', credentialData, nodeData)
 
-        const obj: NotionAPILoaderOptions = {
+        const obj: NotionAPILoaderOptions & { type: 'page' | 'database' } = {
             clientOptions: {
                 auth: notionIntegrationToken
             },
@@ -89,6 +106,7 @@ class NotionPage_DocumentLoaders implements INode {
             type: 'page'
         }
         const loader = new NotionAPILoader(obj)
+        applyCompactTableTransformer(loader)
 
         let docs: IDocument[] = []
         if (textSplitter) {
@@ -130,7 +148,15 @@ class NotionPage_DocumentLoaders implements INode {
             }))
         }
 
-        return docs
+        if (output === 'document') {
+            return docs
+        } else {
+            let finaltext = ''
+            for (const doc of docs) {
+                finaltext += `${doc.pageContent}\n`
+            }
+            return handleEscapeCharacters(finaltext, false)
+        }
     }
 }
 

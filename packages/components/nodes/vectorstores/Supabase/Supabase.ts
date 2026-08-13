@@ -3,11 +3,12 @@ import { v4 as uuidv4 } from 'uuid'
 import { createClient } from '@supabase/supabase-js'
 import { Document } from '@langchain/core/documents'
 import { Embeddings } from '@langchain/core/embeddings'
-import { SupabaseVectorStore, SupabaseLibArgs, SupabaseFilterRPCCall } from '@langchain/community/vectorstores/supabase'
+import { SupabaseVectorStore, SupabaseLibArgs } from '@langchain/community/vectorstores/supabase'
 import { ICommonObject, INode, INodeData, INodeOutputsValue, INodeParams, IndexingResult } from '../../../src/Interface'
-import { getBaseClasses, getCredentialData, getCredentialParam } from '../../../src/utils'
+import { getBaseClasses, getCredentialData, getCredentialParam, parseJsonBody } from '../../../src/utils'
 import { addMMRInputParams, resolveVectorStoreOrRetriever } from '../VectorStoreUtils'
 import { index } from '../../../src/indexing'
+import { FilterParser } from './filterParser'
 
 class Supabase_VectorStores implements INode {
     label: string
@@ -78,7 +79,8 @@ class Supabase_VectorStores implements INode {
                 name: 'supabaseMetadataFilter',
                 type: 'json',
                 optional: true,
-                additionalParams: true
+                additionalParams: true,
+                acceptVariable: true
             },
             {
                 label: 'Supabase RPC Filter',
@@ -171,6 +173,44 @@ class Supabase_VectorStores implements INode {
             } catch (e) {
                 throw new Error(e)
             }
+        },
+        async delete(nodeData: INodeData, ids: string[], options: ICommonObject): Promise<void> {
+            const supabaseProjUrl = nodeData.inputs?.supabaseProjUrl as string
+            const tableName = nodeData.inputs?.tableName as string
+            const queryName = nodeData.inputs?.queryName as string
+            const embeddings = nodeData.inputs?.embeddings as Embeddings
+            const recordManager = nodeData.inputs?.recordManager
+
+            const credentialData = await getCredentialData(nodeData.credential ?? '', options)
+            const supabaseApiKey = getCredentialParam('supabaseApiKey', credentialData, nodeData)
+
+            const client = createClient(supabaseProjUrl, supabaseApiKey)
+
+            const supabaseStore = new SupabaseVectorStore(embeddings, {
+                client,
+                tableName: tableName,
+                queryName: queryName
+            })
+
+            try {
+                if (recordManager) {
+                    const vectorStoreName = tableName + '_' + queryName
+                    await recordManager.createSchema()
+                    ;(recordManager as any).namespace = (recordManager as any).namespace + '_' + vectorStoreName
+                    const filterKeys: ICommonObject = {}
+                    if (options.docId) {
+                        filterKeys.docId = options.docId
+                    }
+                    const keys: string[] = await recordManager.listKeys(filterKeys)
+
+                    await supabaseStore.delete({ ids: keys })
+                    await recordManager.deleteKeys(keys)
+                } else {
+                    await supabaseStore.delete({ ids })
+                }
+            } catch (e) {
+                throw new Error(e)
+            }
         }
     }
 
@@ -194,16 +234,13 @@ class Supabase_VectorStores implements INode {
         }
 
         if (supabaseMetadataFilter) {
-            const metadatafilter = typeof supabaseMetadataFilter === 'object' ? supabaseMetadataFilter : JSON.parse(supabaseMetadataFilter)
+            const metadatafilter =
+                typeof supabaseMetadataFilter === 'object' ? supabaseMetadataFilter : parseJsonBody(supabaseMetadataFilter)
             obj.filter = metadatafilter
         }
 
         if (supabaseRPCFilter) {
-            const funcString = `return rpc.${supabaseRPCFilter};`
-            const funcFilter = new Function('rpc', funcString)
-            obj.filter = (rpc: SupabaseFilterRPCCall) => {
-                return funcFilter(rpc)
-            }
+            obj.filter = FilterParser.parseFilterString(supabaseRPCFilter)
         }
 
         const vectorStore = await SupabaseVectorStore.fromExistingIndex(embeddings, obj)

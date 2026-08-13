@@ -1,5 +1,5 @@
-import { APIChain, createOpenAPIChain } from 'langchain/chains'
-import { ICommonObject, INode, INodeData, INodeParams } from '../../../src/Interface'
+import { APIChain, createOpenAPIChain } from '@langchain/classic/chains'
+import { ICommonObject, INode, INodeData, INodeParams, IServerSideEventStreamer } from '../../../src/Interface'
 import { getBaseClasses } from '../../../src/utils'
 import { ConsoleCallbackHandler, CustomChainHandler, additionalCallbacks } from '../../../src/handler'
 import { checkInputs, Moderation, streamResponse } from '../../moderation/Moderation'
@@ -17,6 +17,7 @@ class OpenApiChain_Chains implements INode {
     baseClasses: string[]
     description: string
     inputs: INodeParams[]
+    badge: string
 
     constructor() {
         this.label = 'OpenAPI Chain'
@@ -25,6 +26,7 @@ class OpenApiChain_Chains implements INode {
         this.type = 'OpenAPIChain'
         this.icon = 'openapi.svg'
         this.category = 'Chains'
+        this.badge = 'DEPRECATING'
         this.description = 'Chain that automatically select and call APIs based only on an OpenAPI spec'
         this.baseClasses = [this.type, ...getBaseClasses(APIChain)]
         this.inputs = [
@@ -71,21 +73,27 @@ class OpenApiChain_Chains implements INode {
 
     async run(nodeData: INodeData, input: string, options: ICommonObject): Promise<string | object> {
         const chain = await initChain(nodeData, options)
-        const loggerHandler = new ConsoleCallbackHandler(options.logger)
+        const loggerHandler = new ConsoleCallbackHandler(options.logger, options?.orgId)
         const callbacks = await additionalCallbacks(nodeData, options)
         const moderations = nodeData.inputs?.inputModeration as Moderation[]
+        const shouldStreamResponse = options.shouldStreamResponse
+        const sseStreamer: IServerSideEventStreamer = options.sseStreamer as IServerSideEventStreamer
+        const chatId = options.chatId
+
         if (moderations && moderations.length > 0) {
             try {
                 // Use the output of the moderation chain as input for the OpenAPI chain
                 input = await checkInputs(moderations, input)
             } catch (e) {
                 await new Promise((resolve) => setTimeout(resolve, 500))
-                streamResponse(options.socketIO && options.socketIOClientId, e.message, options.socketIO, options.socketIOClientId)
+                if (options.shouldStreamResponse) {
+                    streamResponse(sseStreamer, chatId, e.message)
+                }
                 return formatResponse(e.message)
             }
         }
-        if (options.socketIO && options.socketIOClientId) {
-            const handler = new CustomChainHandler(options.socketIO, options.socketIOClientId)
+        if (shouldStreamResponse) {
+            const handler = new CustomChainHandler(sseStreamer, chatId)
             const res = await chain.run(input, [loggerHandler, handler, ...callbacks])
             return res
         } else {
@@ -108,8 +116,9 @@ const initChain = async (nodeData: INodeData, options: ICommonObject) => {
     } else {
         if (yamlFileBase64.startsWith('FILE-STORAGE::')) {
             const file = yamlFileBase64.replace('FILE-STORAGE::', '')
+            const orgId = options.orgId
             const chatflowid = options.chatflowid
-            const fileData = await getFileFromStorage(file, chatflowid)
+            const fileData = await getFileFromStorage(file, orgId, chatflowid)
             yamlString = fileData.toString()
         } else {
             const splitDataURI = yamlFileBase64.split(',')

@@ -1,23 +1,34 @@
-import { closeSnackbar as closeSnackbarAction, enqueueSnackbar as enqueueSnackbarAction, MENU_OPEN, REMOVE_DIRTY } from '@/store/actions'
-import { sanitizeChatflows } from '@/utils/genericHelper'
-import useNotifier from '@/utils/useNotifier'
 import PropTypes from 'prop-types'
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useDispatch, useSelector } from 'react-redux'
+import { useNavigate } from 'react-router-dom'
+
+import { closeSnackbar as closeSnackbarAction, enqueueSnackbar as enqueueSnackbarAction, REMOVE_DIRTY } from '@/store/actions'
+import { exportData, stringify } from '@/utils/exportImport'
+import useNotifier from '@/utils/useNotifier'
+
 // material-ui
 import {
     Avatar,
     Box,
     Button,
     ButtonBase,
+    Checkbox,
     ClickAwayListener,
+    Dialog,
+    DialogActions,
+    DialogContent,
+    DialogTitle,
     Divider,
+    FormControlLabel,
     List,
     ListItemButton,
     ListItemIcon,
     ListItemText,
     Paper,
     Popper,
+    Stack,
     Typography
 } from '@mui/material'
 import { useTheme } from '@mui/material/styles'
@@ -26,24 +37,180 @@ import { useTheme } from '@mui/material/styles'
 import PerfectScrollbar from 'react-perfect-scrollbar'
 
 // project imports
+import { PermissionListItemButton } from '@/ui-component/button/RBACButtons'
 import MainCard from '@/ui-component/cards/MainCard'
 import AboutDialog from '@/ui-component/dialog/AboutDialog'
 import Transitions from '@/ui-component/extended/Transitions'
 
 // assets
-import { IconFileExport, IconFileUpload, IconInfoCircle, IconLogout, IconSettings, IconX } from '@tabler/icons-react'
+import ExportingGIF from '@/assets/images/Exporting.gif'
+import { IconFileExport, IconFileUpload, IconInfoCircle, IconLogout, IconSettings, IconUserEdit, IconX } from '@tabler/icons-react'
 import './index.css'
 
-//API
-import chatFlowsApi from '@/api/chatflows'
+// API
+import exportImportApi from '@/api/exportimport'
 
 // Hooks
 import useApi from '@/hooks/useApi'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { getErrorMessage } from '@/utils/errorHandler'
+
+const dataToExport = [
+    'Agentflows',
+    'Agentflows V2',
+    'Assistants Custom',
+    'Assistants OpenAI',
+    'Assistants Azure',
+    'Chatflows',
+    'Chat Messages',
+    'Chat Feedbacks',
+    'Custom Templates',
+    'Document Stores',
+    'Executions',
+    'Tools',
+    'Variables'
+]
+
+const ExportDialog = ({ show, onCancel, onExport }) => {
+    const portalElement = document.getElementById('portal')
+
+    const [selectedData, setSelectedData] = useState(dataToExport)
+    const [isExporting, setIsExporting] = useState(false)
+
+    useEffect(() => {
+        if (show) setIsExporting(false)
+
+        return () => {
+            setIsExporting(false)
+        }
+
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [show])
+
+    const component = show ? (
+        <Dialog
+            onClose={!isExporting ? onCancel : undefined}
+            open={show}
+            fullWidth
+            maxWidth='sm'
+            aria-labelledby='export-dialog-title'
+            aria-describedby='export-dialog-description'
+        >
+            <DialogTitle sx={{ fontSize: '1rem' }} id='export-dialog-title'>
+                {!isExporting ? 'Select Data to Export' : 'Exporting..'}
+            </DialogTitle>
+            <DialogContent>
+                {!isExporting && (
+                    <Stack
+                        direction='row'
+                        sx={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(2, 1fr)',
+                            gap: 1
+                        }}
+                    >
+                        {dataToExport.map((data, index) => (
+                            <FormControlLabel
+                                key={index}
+                                size='small'
+                                control={
+                                    <Checkbox
+                                        color='success'
+                                        checked={selectedData.includes(data)}
+                                        onChange={(event) => {
+                                            setSelectedData(
+                                                event.target.checked
+                                                    ? [...selectedData, data]
+                                                    : selectedData.filter((item) => item !== data)
+                                            )
+                                        }}
+                                    />
+                                }
+                                label={data}
+                            />
+                        ))}
+                    </Stack>
+                )}
+                {isExporting && (
+                    <Box sx={{ height: 'auto', display: 'flex', justifyContent: 'center', mb: 3 }}>
+                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            <img
+                                style={{
+                                    objectFit: 'cover',
+                                    height: 'auto',
+                                    width: 'auto'
+                                }}
+                                src={ExportingGIF}
+                                alt='ExportingGIF'
+                            />
+                            <span>Exporting data might takes a while</span>
+                        </div>
+                    </Box>
+                )}
+            </DialogContent>
+            {!isExporting && (
+                <DialogActions>
+                    <Button onClick={onCancel}>Cancel</Button>
+                    <Button
+                        disabled={selectedData.length === 0}
+                        variant='contained'
+                        onClick={() => {
+                            setIsExporting(true)
+                            onExport(selectedData)
+                        }}
+                    >
+                        Export
+                    </Button>
+                </DialogActions>
+            )}
+        </Dialog>
+    ) : null
+
+    return createPortal(component, portalElement)
+}
+
+ExportDialog.propTypes = {
+    show: PropTypes.bool,
+    onCancel: PropTypes.func,
+    onExport: PropTypes.func
+}
+
+const ImportDialog = ({ show }) => {
+    const portalElement = document.getElementById('portal')
+
+    const component = show ? (
+        <Dialog open={show} fullWidth maxWidth='sm' aria-labelledby='import-dialog-title' aria-describedby='import-dialog-description'>
+            <DialogTitle sx={{ fontSize: '1rem' }} id='import-dialog-title'>
+                Importing...
+            </DialogTitle>
+            <DialogContent>
+                <Box sx={{ height: 'auto', display: 'flex', justifyContent: 'center', mb: 3 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                        <img
+                            style={{
+                                objectFit: 'cover',
+                                height: 'auto',
+                                width: 'auto'
+                            }}
+                            src={ExportingGIF}
+                            alt='ImportingGIF'
+                        />
+                        <span>Importing data might takes a while</span>
+                    </div>
+                </Box>
+            </DialogContent>
+        </Dialog>
+    ) : null
+
+    return createPortal(component, portalElement)
+}
+
+ImportDialog.propTypes = {
+    show: PropTypes.bool
+}
 
 // ==============================|| PROFILE MENU ||============================== //
 
-const ProfileSection = ({ username, handleLogout }) => {
+const ProfileSection = ({ handleLogout }) => {
     const theme = useTheme()
 
     const customization = useSelector((state) => state.customization)
@@ -51,11 +218,19 @@ const ProfileSection = ({ username, handleLogout }) => {
     const [open, setOpen] = useState(false)
     const [aboutDialogOpen, setAboutDialogOpen] = useState(false)
 
+    const [exportDialogOpen, setExportDialogOpen] = useState(false)
+    const [importDialogOpen, setImportDialogOpen] = useState(false)
+
     const anchorRef = useRef(null)
     const inputRef = useRef()
 
     const navigate = useNavigate()
-    const location = useLocation()
+    const currentUser = useSelector((state) => state.auth.user)
+    const isAuthenticated = useSelector((state) => state.auth.isAuthenticated)
+
+    const importAllApi = useApi(exportImportApi.importData)
+    const exportAllApi = useApi(exportImportApi.exportData)
+    const prevOpen = useRef(open)
 
     // ==============================|| Snackbar ||============================== //
 
@@ -90,27 +265,29 @@ const ProfileSection = ({ username, handleLogout }) => {
             }
         })
     }
-    const importChatflowsApi = useApi(chatFlowsApi.importChatflows)
+
     const fileChange = (e) => {
         if (!e.target.files) return
 
         const file = e.target.files[0]
+        setImportDialogOpen(true)
 
         const reader = new FileReader()
         reader.onload = (evt) => {
             if (!evt?.target?.result) {
                 return
             }
-            const chatflows = JSON.parse(evt.target.result)
-            importChatflowsApi.request(chatflows)
+            const body = JSON.parse(evt.target.result)
+            importAllApi.request(body)
         }
         reader.readAsText(file)
     }
 
-    const importChatflowsSuccess = () => {
+    const importAllSuccess = () => {
+        setImportDialogOpen(false)
         dispatch({ type: REMOVE_DIRTY })
         enqueueSnackbar({
-            message: `Import chatflows successful`,
+            message: `Import All successful`,
             options: {
                 key: new Date().getTime() + Math.random(),
                 variant: 'success',
@@ -122,65 +299,88 @@ const ProfileSection = ({ username, handleLogout }) => {
             }
         })
     }
-    useEffect(() => {
-        if (importChatflowsApi.error) errorFailed(`Failed to import chatflows: ${importChatflowsApi.error.response.data.message}`)
-        if (importChatflowsApi.data) {
-            importChatflowsSuccess()
-            // if current location is /chatflows, refresh the page
-            if (location.pathname === '/chatflows') navigate(0)
-            else {
-                // if not redirect to /chatflows
-                dispatch({ type: MENU_OPEN, id: 'chatflows' })
-                navigate('/chatflows')
-            }
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [importChatflowsApi.error, importChatflowsApi.data])
-    const importAllChatflows = () => {
+
+    const importAll = () => {
         inputRef.current.click()
     }
-    const getAllChatflowsApi = useApi(chatFlowsApi.getAllChatflows)
 
-    const exportChatflowsSuccess = () => {
-        dispatch({ type: REMOVE_DIRTY })
-        enqueueSnackbar({
-            message: `Export chatflows successful`,
-            options: {
-                key: new Date().getTime() + Math.random(),
-                variant: 'success',
-                action: (key) => (
-                    <Button style={{ color: 'white' }} onClick={() => closeSnackbar(key)}>
-                        <IconX />
-                    </Button>
-                )
-            }
-        })
+    const onExport = (data) => {
+        const body = {}
+        if (data.includes('Agentflows')) body.agentflow = true
+        if (data.includes('Agentflows V2')) body.agentflowv2 = true
+        if (data.includes('Assistants Custom')) body.assistantCustom = true
+        if (data.includes('Assistants OpenAI')) body.assistantOpenAI = true
+        if (data.includes('Assistants Azure')) body.assistantAzure = true
+        if (data.includes('Chatflows')) body.chatflow = true
+        if (data.includes('Chat Messages')) body.chat_message = true
+        if (data.includes('Chat Feedbacks')) body.chat_feedback = true
+        if (data.includes('Custom Templates')) body.custom_template = true
+        if (data.includes('Document Stores')) body.document_store = true
+        if (data.includes('Executions')) body.execution = true
+        if (data.includes('Tools')) body.tool = true
+        if (data.includes('Variables')) body.variable = true
+
+        exportAllApi.request(body)
     }
 
     useEffect(() => {
-        if (getAllChatflowsApi.error) errorFailed(`Failed to export Chatflows: ${getAllChatflowsApi.error.response.data.message}`)
-        if (getAllChatflowsApi.data) {
-            const sanitizedChatflows = sanitizeChatflows(getAllChatflowsApi.data)
-            const dataStr = JSON.stringify({ Chatflows: sanitizedChatflows }, null, 2)
-            const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr)
-
-            const exportFileDefaultName = 'AllChatflows.json'
-
-            const linkElement = document.createElement('a')
-            linkElement.setAttribute('href', dataUri)
-            linkElement.setAttribute('download', exportFileDefaultName)
-            linkElement.click()
-            exportChatflowsSuccess()
+        if (importAllApi.data) {
+            importAllSuccess()
+            navigate(0)
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [getAllChatflowsApi.error, getAllChatflowsApi.data])
+    }, [importAllApi.data])
 
-    const prevOpen = useRef(open)
+    useEffect(() => {
+        if (importAllApi.error) {
+            setImportDialogOpen(false)
+            let errMsg = 'Invalid Imported File'
+            let error = importAllApi.error
+            if (error?.response?.data) {
+                errMsg = typeof error.response.data === 'object' ? error.response.data.message : error.response.data
+            }
+            errorFailed(`Failed to import: ${errMsg}`)
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [importAllApi.error])
+
+    useEffect(() => {
+        if (exportAllApi.data) {
+            setExportDialogOpen(false)
+            try {
+                const dataStr = stringify(exportData(exportAllApi.data))
+                //const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr)
+                const blob = new Blob([dataStr], { type: 'application/json' })
+                const dataUri = URL.createObjectURL(blob)
+
+                const linkElement = document.createElement('a')
+                linkElement.setAttribute('href', dataUri)
+                linkElement.setAttribute('download', exportAllApi.data.FileDefaultName)
+                linkElement.click()
+            } catch (error) {
+                errorFailed(`Failed to export all: ${getErrorMessage(error)}`)
+            }
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [exportAllApi.data])
+
+    useEffect(() => {
+        if (exportAllApi.error) {
+            setExportDialogOpen(false)
+            let errMsg = 'Internal Server Error'
+            let error = exportAllApi.error
+            if (error?.response?.data) {
+                errMsg = typeof error.response.data === 'object' ? error.response.data.message : error.response.data
+            }
+            errorFailed(`Failed to export: ${errMsg}`)
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [exportAllApi.error])
+
     useEffect(() => {
         if (prevOpen.current === true && open === false) {
             anchorRef.current.focus()
         }
-
         prevOpen.current = open
     }, [open])
 
@@ -229,10 +429,16 @@ const ProfileSection = ({ username, handleLogout }) => {
                         <Paper>
                             <ClickAwayListener onClickAway={handleClose}>
                                 <MainCard border={false} elevation={16} content={false} boxShadow shadow={theme.shadows[16]}>
-                                    {username && (
+                                    {isAuthenticated && currentUser ? (
                                         <Box sx={{ p: 2 }}>
                                             <Typography component='span' variant='h4'>
-                                                {username}
+                                                {currentUser.name}
+                                            </Typography>
+                                        </Box>
+                                    ) : (
+                                        <Box sx={{ p: 2 }}>
+                                            <Typography component='span' variant='h4'>
+                                                User
                                             </Typography>
                                         </Box>
                                     )}
@@ -255,29 +461,31 @@ const ProfileSection = ({ username, handleLogout }) => {
                                                     }
                                                 }}
                                             >
-                                                <ListItemButton
+                                                <PermissionListItemButton
+                                                    permissionId='workspace:export'
                                                     sx={{ borderRadius: `${customization.borderRadius}px` }}
                                                     onClick={() => {
-                                                        getAllChatflowsApi.request()
+                                                        setExportDialogOpen(true)
                                                     }}
                                                 >
                                                     <ListItemIcon>
                                                         <IconFileExport stroke={1.5} size='1.3rem' />
                                                     </ListItemIcon>
-                                                    <ListItemText primary={<Typography variant='body2'>Export Chatflows</Typography>} />
-                                                </ListItemButton>
-                                                <ListItemButton
+                                                    <ListItemText primary={<Typography variant='body2'>Export</Typography>} />
+                                                </PermissionListItemButton>
+                                                <PermissionListItemButton
+                                                    permissionId='workspace:import'
                                                     sx={{ borderRadius: `${customization.borderRadius}px` }}
                                                     onClick={() => {
-                                                        importAllChatflows()
+                                                        importAll()
                                                     }}
                                                 >
                                                     <ListItemIcon>
                                                         <IconFileUpload stroke={1.5} size='1.3rem' />
                                                     </ListItemIcon>
-                                                    <ListItemText primary={<Typography variant='body2'>Import Chatflows</Typography>} />
-                                                </ListItemButton>
-                                                <input ref={inputRef} type='file' hidden onChange={fileChange} />
+                                                    <ListItemText primary={<Typography variant='body2'>Import</Typography>} />
+                                                </PermissionListItemButton>
+                                                <input ref={inputRef} type='file' hidden onChange={fileChange} accept='.json' />
                                                 <ListItemButton
                                                     sx={{ borderRadius: `${customization.borderRadius}px` }}
                                                     onClick={() => {
@@ -288,19 +496,31 @@ const ProfileSection = ({ username, handleLogout }) => {
                                                     <ListItemIcon>
                                                         <IconInfoCircle stroke={1.5} size='1.3rem' />
                                                     </ListItemIcon>
-                                                    <ListItemText primary={<Typography variant='body2'>About Flowise</Typography>} />
+                                                    <ListItemText primary={<Typography variant='body2'>Version</Typography>} />
                                                 </ListItemButton>
-                                                {localStorage.getItem('username') && localStorage.getItem('password') && (
+                                                {isAuthenticated && !currentUser.isSSO && (
                                                     <ListItemButton
                                                         sx={{ borderRadius: `${customization.borderRadius}px` }}
-                                                        onClick={handleLogout}
+                                                        onClick={() => {
+                                                            setOpen(false)
+                                                            navigate('/account')
+                                                        }}
                                                     >
                                                         <ListItemIcon>
-                                                            <IconLogout stroke={1.5} size='1.3rem' />
+                                                            <IconUserEdit stroke={1.5} size='1.3rem' />
                                                         </ListItemIcon>
-                                                        <ListItemText primary={<Typography variant='body2'>Logout</Typography>} />
+                                                        <ListItemText primary={<Typography variant='body2'>Account Settings</Typography>} />
                                                     </ListItemButton>
                                                 )}
+                                                <ListItemButton
+                                                    sx={{ borderRadius: `${customization.borderRadius}px` }}
+                                                    onClick={handleLogout}
+                                                >
+                                                    <ListItemIcon>
+                                                        <IconLogout stroke={1.5} size='1.3rem' />
+                                                    </ListItemIcon>
+                                                    <ListItemText primary={<Typography variant='body2'>Logout</Typography>} />
+                                                </ListItemButton>
                                             </List>
                                         </Box>
                                     </PerfectScrollbar>
@@ -311,12 +531,13 @@ const ProfileSection = ({ username, handleLogout }) => {
                 )}
             </Popper>
             <AboutDialog show={aboutDialogOpen} onCancel={() => setAboutDialogOpen(false)} />
+            <ExportDialog show={exportDialogOpen} onCancel={() => setExportDialogOpen(false)} onExport={(data) => onExport(data)} />
+            <ImportDialog show={importDialogOpen} />
         </>
     )
 }
 
 ProfileSection.propTypes = {
-    username: PropTypes.string,
     handleLogout: PropTypes.func
 }
 

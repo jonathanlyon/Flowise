@@ -1,26 +1,107 @@
+import { uniq, get, isEqual } from 'lodash'
 import moment from 'moment'
-import { uniq } from 'lodash'
 
 export const getUniqueNodeId = (nodeData, nodes) => {
-    // Get amount of same nodes
-    let totalSameNodes = 0
-    for (let i = 0; i < nodes.length; i += 1) {
-        const node = nodes[i]
-        if (node.data.name === nodeData.name) {
-            totalSameNodes += 1
-        }
+    let suffix = 0
+
+    // Construct base ID
+    let baseId = `${nodeData.name}_${suffix}`
+
+    // Increment suffix until a unique ID is found
+    while (nodes.some((node) => node.id === baseId)) {
+        suffix += 1
+        baseId = `${nodeData.name}_${suffix}`
     }
 
-    // Get unique id
-    let nodeId = `${nodeData.name}_${totalSameNodes}`
-    for (let i = 0; i < nodes.length; i += 1) {
-        const node = nodes[i]
-        if (node.id === nodeId) {
-            totalSameNodes += 1
-            nodeId = `${nodeData.name}_${totalSameNodes}`
-        }
+    return baseId
+}
+
+export const getUniqueNodeLabel = (nodeData, nodes) => {
+    if (nodeData.type === 'StickyNote') return nodeData.label
+    if (nodeData.name === 'startAgentflow') return nodeData.label
+
+    let suffix = 0
+
+    // Construct base ID
+    let baseId = `${nodeData.name}_${suffix}`
+
+    // Increment suffix until a unique ID is found
+    while (nodes.some((node) => node.id === baseId)) {
+        suffix += 1
+        baseId = `${nodeData.name}_${suffix}`
     }
-    return nodeId
+
+    return `${nodeData.label} ${suffix}`
+}
+
+const createAgentFlowOutputs = (nodeData, newNodeId) => {
+    if (nodeData.hideOutput) return []
+
+    if (nodeData.outputs?.length) {
+        return nodeData.outputs.map((_, index) => ({
+            id: `${newNodeId}-output-${index}`,
+            label: nodeData.label,
+            name: nodeData.name
+        }))
+    }
+
+    return [
+        {
+            id: `${newNodeId}-output-${nodeData.name}`,
+            label: nodeData.label,
+            name: nodeData.name
+        }
+    ]
+}
+
+const createOutputOption = (output, newNodeId) => {
+    const outputBaseClasses = output.baseClasses ?? []
+    const baseClasses = outputBaseClasses.length > 1 ? outputBaseClasses.join('|') : outputBaseClasses[0] || ''
+
+    const type = outputBaseClasses.length > 1 ? outputBaseClasses.join(' | ') : outputBaseClasses[0] || ''
+
+    return {
+        id: `${newNodeId}-output-${output.name}-${baseClasses}`,
+        name: output.name,
+        label: output.label,
+        description: output.description ?? '',
+        type,
+        isAnchor: output?.isAnchor,
+        hidden: output?.hidden
+    }
+}
+
+const createStandardOutputs = (nodeData, newNodeId) => {
+    if (nodeData.hideOutput) return []
+
+    if (nodeData.outputs?.length) {
+        const outputOptions = nodeData.outputs.map((output) => createOutputOption(output, newNodeId))
+
+        return [
+            {
+                name: 'output',
+                label: 'Output',
+                type: 'options',
+                description: nodeData.outputs[0].description ?? '',
+                options: outputOptions,
+                default: nodeData.outputs[0].name
+            }
+        ]
+    }
+
+    return [
+        {
+            id: `${newNodeId}-output-${nodeData.name}-${nodeData.baseClasses.join('|')}`,
+            name: nodeData.name,
+            label: nodeData.type,
+            description: nodeData.description ?? '',
+            type: nodeData.baseClasses.join(' | ')
+        }
+    ]
+}
+
+const initializeOutputAnchors = (nodeData, newNodeId, isAgentflow) => {
+    return isAgentflow ? createAgentFlowOutputs(nodeData, newNodeId) : createStandardOutputs(nodeData, newNodeId)
 }
 
 export const initializeDefaultNodeData = (nodeParams) => {
@@ -34,16 +115,17 @@ export const initializeDefaultNodeData = (nodeParams) => {
     return initialValues
 }
 
-export const initNode = (nodeData, newNodeId) => {
+export const initNode = (nodeData, newNodeId, isAgentflow) => {
     const inputAnchors = []
     const inputParams = []
     const incoming = nodeData.inputs ? nodeData.inputs.length : 0
-    const outgoing = 1
 
     const whitelistTypes = [
         'asyncOptions',
+        'asyncMultiOptions',
         'options',
         'multiOptions',
+        'array',
         'datagrid',
         'string',
         'number',
@@ -55,7 +137,11 @@ export const initNode = (nodeData, newNodeId) => {
         'file',
         'folder',
         'tabs',
-        'conditionFunction' // This is a special type for condition functions
+        'conditionFunction', // This is a special type for condition functions
+        'timePicker',
+        'weekDaysPicker',
+        'monthDaysPicker',
+        'datePicker'
     ]
 
     // Inputs
@@ -81,55 +167,7 @@ export const initNode = (nodeData, newNodeId) => {
     }
 
     // Outputs
-    const outputAnchors = []
-    for (let i = 0; i < outgoing; i += 1) {
-        if (nodeData.hideOutput) continue
-        if (nodeData.outputs && nodeData.outputs.length) {
-            const options = []
-            for (let j = 0; j < nodeData.outputs.length; j += 1) {
-                let baseClasses = ''
-                let type = ''
-
-                const outputBaseClasses = nodeData.outputs[j].baseClasses ?? []
-                if (outputBaseClasses.length > 1) {
-                    baseClasses = outputBaseClasses.join('|')
-                    type = outputBaseClasses.join(' | ')
-                } else if (outputBaseClasses.length === 1) {
-                    baseClasses = outputBaseClasses[0]
-                    type = outputBaseClasses[0]
-                }
-
-                const newOutputOption = {
-                    id: `${newNodeId}-output-${nodeData.outputs[j].name}-${baseClasses}`,
-                    name: nodeData.outputs[j].name,
-                    label: nodeData.outputs[j].label,
-                    description: nodeData.outputs[j].description ?? '',
-                    type,
-                    isAnchor: nodeData.outputs[j]?.isAnchor,
-                    hidden: nodeData.outputs[j]?.hidden
-                }
-                options.push(newOutputOption)
-            }
-            const newOutput = {
-                name: 'output',
-                label: 'Output',
-                type: 'options',
-                description: nodeData.outputs[0].description ?? '',
-                options,
-                default: nodeData.outputs[0].name
-            }
-            outputAnchors.push(newOutput)
-        } else {
-            const newOutput = {
-                id: `${newNodeId}-output-${nodeData.name}-${nodeData.baseClasses.join('|')}`,
-                name: nodeData.name,
-                label: nodeData.type,
-                description: nodeData.description ?? '',
-                type: nodeData.baseClasses.join(' | ')
-            }
-            outputAnchors.push(newOutput)
-        }
-    }
+    let outputAnchors = initializeOutputAnchors(nodeData, newNodeId, isAgentflow)
 
     /* Initial
     inputs = [
@@ -166,9 +204,10 @@ export const initNode = (nodeData, newNodeId) => {
 
     // Inputs
     if (nodeData.inputs) {
-        nodeData.inputAnchors = inputAnchors
-        nodeData.inputParams = inputParams
-        nodeData.inputs = initializeDefaultNodeData(nodeData.inputs)
+        const defaultInputs = initializeDefaultNodeData(nodeData.inputs)
+        nodeData.inputAnchors = showHideInputAnchors({ ...nodeData, inputAnchors, inputs: defaultInputs })
+        nodeData.inputParams = showHideInputParams({ ...nodeData, inputParams, inputs: defaultInputs })
+        nodeData.inputs = defaultInputs
     } else {
         nodeData.inputAnchors = []
         nodeData.inputParams = []
@@ -191,8 +230,10 @@ export const initNode = (nodeData, newNodeId) => {
     return nodeData
 }
 
-export const updateOutdatedNodeData = (newComponentNodeData, existingComponentNodeData) => {
-    const initNewComponentNodeData = initNode(newComponentNodeData, existingComponentNodeData.id)
+export const updateOutdatedNodeData = (newComponentNodeData, existingComponentNodeData, isAgentflow) => {
+    const initNewComponentNodeData = initNode(newComponentNodeData, existingComponentNodeData.id, isAgentflow)
+
+    const isAgentFlowV2 = newComponentNodeData.category === 'Agent Flows' || existingComponentNodeData.category === 'Agent Flows'
 
     // Update credentials with existing credentials
     if (existingComponentNodeData.credential) {
@@ -208,6 +249,72 @@ export const updateOutdatedNodeData = (newComponentNodeData, existingComponentNo
         }
     }
 
+    // Handle loadConfig parameters - preserve configuration objects
+    if (existingComponentNodeData.inputs && initNewComponentNodeData.inputParams) {
+        // Find parameters with loadConfig: true
+        const loadConfigParams = initNewComponentNodeData.inputParams.filter((param) => param.loadConfig === true)
+
+        for (const param of loadConfigParams) {
+            const configKey = `${param.name}Config`
+
+            // Preserve top-level config objects (e.g., agentModelConfig)
+            if (existingComponentNodeData.inputs[configKey]) {
+                initNewComponentNodeData.inputs[configKey] = existingComponentNodeData.inputs[configKey]
+            }
+        }
+
+        // Handle array parameters that might contain loadConfig items
+        const arrayParams = initNewComponentNodeData.inputParams.filter((param) => param.type === 'array' && param.array)
+
+        for (const arrayParam of arrayParams) {
+            if (existingComponentNodeData.inputs[arrayParam.name] && Array.isArray(existingComponentNodeData.inputs[arrayParam.name])) {
+                const existingArray = existingComponentNodeData.inputs[arrayParam.name]
+
+                // Find loadConfig parameters within the array definition
+                const arrayLoadConfigParams = arrayParam.array.filter((subParam) => subParam.loadConfig === true)
+
+                if (arrayLoadConfigParams.length > 0) {
+                    // Process each array item to preserve config objects
+                    const updatedArray = existingArray.map((existingItem) => {
+                        if (typeof existingItem === 'object' && existingItem !== null) {
+                            const updatedItem = { ...existingItem }
+
+                            // Preserve config objects for each loadConfig parameter in the array
+                            for (const loadConfigParam of arrayLoadConfigParams) {
+                                const configKey = `${loadConfigParam.name}Config`
+                                if (existingItem[configKey]) {
+                                    updatedItem[configKey] = existingItem[configKey]
+                                }
+                            }
+
+                            return updatedItem
+                        }
+                        return existingItem
+                    })
+
+                    initNewComponentNodeData.inputs[arrayParam.name] = updatedArray
+                }
+            }
+        }
+
+        // Also preserve any config keys that exist in the existing data but might not be explicitly handled above
+        // This catches edge cases where config keys exist but don't follow the expected pattern
+        for (const key in existingComponentNodeData.inputs) {
+            if (key.endsWith('Config') && !initNewComponentNodeData.inputs[key]) {
+                initNewComponentNodeData.inputs[key] = existingComponentNodeData.inputs[key]
+            }
+        }
+    }
+    // Check for tabs
+    const inputParamsWithTabIdentifiers = initNewComponentNodeData.inputParams.filter((param) => param.tabIdentifier) || []
+
+    for (const inputParam of inputParamsWithTabIdentifiers) {
+        const tabIdentifier = `${inputParam.tabIdentifier}_${existingComponentNodeData.id}`
+        let selectedTabValue = existingComponentNodeData.inputs[tabIdentifier] || inputParam.default
+        initNewComponentNodeData.inputs[tabIdentifier] = selectedTabValue
+        initNewComponentNodeData.inputs[selectedTabValue] = existingComponentNodeData.inputs[selectedTabValue]
+    }
+
     // Update outputs with existing outputs
     if (existingComponentNodeData.outputs) {
         for (const key in existingComponentNodeData.outputs) {
@@ -217,35 +324,94 @@ export const updateOutdatedNodeData = (newComponentNodeData, existingComponentNo
         }
     }
 
+    if (isAgentFlowV2) {
+        // persists the label from the existing node
+        initNewComponentNodeData.label = existingComponentNodeData.label
+    }
+
+    // Special case for Sequential Condition node to update outputAnchors
+    if (initNewComponentNodeData.name.includes('seqCondition')) {
+        const options = existingComponentNodeData.outputAnchors[0].options || []
+
+        const newOptions = []
+        for (let i = 0; i < options.length; i += 1) {
+            if (options[i].isAnchor) {
+                newOptions.push({
+                    ...options[i],
+                    id: `${initNewComponentNodeData.id}-output-${options[i].name}-Condition`,
+                    type: 'Condition'
+                })
+            }
+        }
+
+        initNewComponentNodeData.outputAnchors[0].options = newOptions
+    }
+
+    // Recompute show/hide visibility against the merged inputs so conditional fields
+    if (initNewComponentNodeData.inputParams) {
+        initNewComponentNodeData.inputParams = showHideInputParams(initNewComponentNodeData)
+    }
+    if (initNewComponentNodeData.inputAnchors) {
+        initNewComponentNodeData.inputAnchors = showHideInputAnchors(initNewComponentNodeData)
+    }
+
     return initNewComponentNodeData
 }
 
 export const updateOutdatedNodeEdge = (newComponentNodeData, edges) => {
     const removedEdges = []
+
+    const isAgentFlowV2 = newComponentNodeData.category === 'Agent Flows'
+
+    // Helper to compare handle/anchor IDs while ignoring trailing base-class/type suffixes
+    // Example:
+    //   azureChatOpenAI_0-output-azureChatOpenAI-A|B|C  vs  azureChatOpenAI_0-output-azureChatOpenAI-A|B
+    // We compare by stripping the last "-..." segment if it contains pipes.
+    const handlesEqual = (a, b) => {
+        if (a === b) return true
+        const stripPipeSuffix = (s) => {
+            if (!s) return s
+            const lastDash = s.lastIndexOf('-')
+            if (lastDash === -1) return s
+            const suffix = s.substring(lastDash + 1)
+            return suffix.includes('|') ? s.substring(0, lastDash) : s
+        }
+        return stripPipeSuffix(a) === stripPipeSuffix(b)
+    }
+
     for (const edge of edges) {
         const targetNodeId = edge.targetHandle.split('-')[0]
         const sourceNodeId = edge.sourceHandle.split('-')[0]
 
         if (targetNodeId === newComponentNodeData.id) {
-            // Check if targetHandle is in inputParams or inputAnchors
-            const inputParam = newComponentNodeData.inputParams.find((param) => param.id === edge.targetHandle)
-            const inputAnchor = newComponentNodeData.inputAnchors.find((param) => param.id === edge.targetHandle)
+            if (isAgentFlowV2) {
+                if (edge.targetHandle !== newComponentNodeData.id) {
+                    removedEdges.push(edge)
+                }
+            } else {
+                // Check if targetHandle is in inputParams or inputAnchors
+                const inputParam = newComponentNodeData.inputParams.find((param) => handlesEqual(param.id, edge.targetHandle))
+                const inputAnchor = newComponentNodeData.inputAnchors.find((param) => handlesEqual(param.id, edge.targetHandle))
 
-            if (!inputParam && !inputAnchor) {
-                removedEdges.push(edge)
+                if (!inputParam && !inputAnchor) {
+                    removedEdges.push(edge)
+                }
             }
         }
 
         if (sourceNodeId === newComponentNodeData.id) {
-            if (newComponentNodeData.outputAnchors?.length) {
+            if (isAgentFlowV2) {
+                // AgentFlow v2 doesn't have specific output anchors, connections are directly from node
+                // No need to remove edges for AgentFlow v2 outputs
+            } else if (newComponentNodeData.outputAnchors?.length) {
                 for (const outputAnchor of newComponentNodeData.outputAnchors) {
                     const outputAnchorType = outputAnchor.type
                     if (outputAnchorType === 'options') {
-                        if (!outputAnchor.options.find((outputOption) => outputOption.id === edge.sourceHandle)) {
+                        if (!outputAnchor.options.find((outputOption) => handlesEqual(outputOption.id, edge.sourceHandle))) {
                             removedEdges.push(edge)
                         }
                     } else {
-                        if (outputAnchor.id !== edge.sourceHandle) {
+                        if (!handlesEqual(outputAnchor.id, edge.sourceHandle)) {
                             removedEdges.push(edge)
                         }
                     }
@@ -292,6 +458,63 @@ export const isValidConnection = (connection, reactFlowInstance) => {
         }
     }
     return false
+}
+
+export const isValidConnectionAgentflowV2 = (connection, reactFlowInstance) => {
+    const source = connection.source
+    const target = connection.target
+
+    // Prevent self connections
+    if (source === target) {
+        return false
+    }
+
+    // Check if this connection would create a cycle in the graph
+    if (wouldCreateCycle(source, target, reactFlowInstance)) {
+        return false
+    }
+
+    return true
+}
+
+// Function to check if a new connection would create a cycle
+const wouldCreateCycle = (sourceId, targetId, reactFlowInstance) => {
+    // The most direct cycle check: if target connects back to source
+    if (sourceId === targetId) {
+        return true
+    }
+
+    // Build directed graph from existing edges
+    const graph = {}
+    const edges = reactFlowInstance.getEdges()
+
+    // Initialize graph
+    edges.forEach((edge) => {
+        if (!graph[edge.source]) graph[edge.source] = []
+        graph[edge.source].push(edge.target)
+    })
+
+    // Check if there's a path from target to source (which would create a cycle when we add source → target)
+    const visited = new Set()
+
+    function hasPath(current, destination) {
+        if (current === destination) return true
+        if (visited.has(current)) return false
+
+        visited.add(current)
+
+        const neighbors = graph[current] || []
+        for (const neighbor of neighbors) {
+            if (hasPath(neighbor, destination)) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    // If there's a path from target to source, adding an edge from source to target will create a cycle
+    return hasPath(targetId, sourceId)
 }
 
 export const convertDateStringToDateObject = (dateString) => {
@@ -346,16 +569,19 @@ export const getFolderName = (base64ArrayStr) => {
     }
 }
 
-export const sanitizeChatflows = (arrayChatflows) => {
-    const sanitizedChatflows = arrayChatflows.map((chatFlow) => {
-        const sanitizeFlowData = generateExportFlowData(JSON.parse(chatFlow.flowData))
-        return {
-            id: chatFlow.id,
-            name: chatFlow.name,
-            flowData: JSON.stringify(sanitizeFlowData, null, 2)
-        }
-    })
-    return sanitizedChatflows
+const _removeCredentialId = (obj) => {
+    if (!obj || typeof obj !== 'object') return obj
+
+    if (Array.isArray(obj)) {
+        return obj.map((item) => _removeCredentialId(item))
+    }
+
+    const newObj = {}
+    for (const [key, value] of Object.entries(obj)) {
+        if (key === 'FLOWISE_CREDENTIAL_ID') continue
+        newObj[key] = _removeCredentialId(value)
+    }
+    return newObj
 }
 
 export const generateExportFlowData = (flowData) => {
@@ -372,6 +598,9 @@ export const generateExportFlowData = (flowData) => {
             version: node.data.version,
             name: node.data.name,
             type: node.data.type,
+            color: node.data.color,
+            hideOutput: node.data.hideOutput,
+            hideInput: node.data.hideInput,
             baseClasses: node.data.baseClasses,
             tags: node.data.tags,
             category: node.data.category,
@@ -397,7 +626,7 @@ export const generateExportFlowData = (flowData) => {
             newNodeData.inputs = nodeDataInputs
         }
 
-        nodes[i].data = newNodeData
+        nodes[i].data = _removeCredentialId(newNodeData)
     }
     const exportJson = {
         nodes,
@@ -406,10 +635,12 @@ export const generateExportFlowData = (flowData) => {
     return exportJson
 }
 
-export const getAvailableNodesForVariable = (nodes, edges, target, targetHandle) => {
+export const getAvailableNodesForVariable = (nodes, edges, target, targetHandle, includesStart = false) => {
     // example edge id = "llmChain_0-llmChain_0-output-outputPrediction-string|json-llmChain_1-llmChain_1-input-promptValues-string"
     //                    {source}  -{sourceHandle}                           -{target}  -{targetHandle}
     const parentNodes = []
+
+    const isAgentFlowV2 = nodes.find((nd) => nd.id === target)?.data?.category === 'Agent Flows'
 
     const isSeqAgent = nodes.find((nd) => nd.id === target)?.data?.category === 'Sequential Agents'
 
@@ -427,8 +658,26 @@ export const getAvailableNodesForVariable = (nodes, edges, target, targetHandle)
             collectParentNodes(parentNode.id, nodes, edges)
 
             // Check and add the parent node to the list if it does not include specific names
-            const excludeNodeNames = ['seqAgent', 'seqLLMNode', 'seqToolNode']
+            const excludeNodeNames = ['seqAgent', 'seqLLMNode', 'seqToolNode', 'seqCustomFunction', 'seqExecuteFlow']
             if (excludeNodeNames.includes(parentNode.data.name)) {
+                parentNodes.push(parentNode)
+            }
+        })
+    }
+    function collectAgentFlowV2ParentNodes(targetNodeId, nodes, edges) {
+        const inputEdges = edges.filter((edg) => edg.target === targetNodeId && edg.targetHandle === targetNodeId)
+
+        // Traverse each edge found
+        inputEdges.forEach((edge) => {
+            const parentNode = nodes.find((nd) => nd.id === edge.source)
+            if (!parentNode) return
+
+            // Recursive call to explore further up the tree
+            collectAgentFlowV2ParentNodes(parentNode.id, nodes, edges)
+
+            // Check and add the parent node to the list if it does not include specific names
+            const excludeNodeNames = ['startAgentflow']
+            if (!excludeNodeNames.includes(parentNode.data.name) || includesStart) {
                 parentNodes.push(parentNode)
             }
         })
@@ -436,6 +685,13 @@ export const getAvailableNodesForVariable = (nodes, edges, target, targetHandle)
 
     if (isSeqAgent) {
         collectParentNodes(target, nodes, edges)
+        return uniq(parentNodes)
+    } else if (isAgentFlowV2) {
+        collectAgentFlowV2ParentNodes(target, nodes, edges)
+        const parentNodeId = nodes.find((nd) => nd.id === target)?.parentNode
+        if (parentNodeId) {
+            collectAgentFlowV2ParentNodes(parentNodeId, nodes, edges)
+        }
         return uniq(parentNodes)
     } else {
         const inputEdges = edges.filter((edg) => edg.target === target && edg.targetHandle === targetHandle)
@@ -561,32 +817,24 @@ export const generateRandomGradient = () => {
     return gradient
 }
 
-export const getInputVariables = (paramValue) => {
-    let returnVal = paramValue
-    const variableStack = []
-    const inputVariables = []
-    let startIdx = 0
-    const endIdx = returnVal.length
+export const getInputVariables = (input) => {
+    // This regex will match single curly-braced substrings
+    const pattern = /\{([^{}]+)\}/g
+    const results = []
 
-    while (startIdx < endIdx) {
-        const substr = returnVal.substring(startIdx, startIdx + 1)
+    let match
 
-        // Store the opening double curly bracket
-        if (substr === '{') {
-            variableStack.push({ substr, startIdx: startIdx + 1 })
+    while ((match = pattern.exec(input)) !== null) {
+        const inside = match[1].trim()
+
+        // Check if there's a colon
+        if (!inside.includes(':')) {
+            // If there's no colon, add to results
+            results.push(inside)
         }
-
-        // Found the complete variable
-        if (substr === '}' && variableStack.length > 0 && variableStack[variableStack.length - 1].substr === '{') {
-            const variableStartIdx = variableStack[variableStack.length - 1].startIdx
-            const variableEndIdx = startIdx
-            const variableFullPath = returnVal.substring(variableStartIdx, variableEndIdx)
-            inputVariables.push(variableFullPath)
-            variableStack.pop()
-        }
-        startIdx += 1
     }
-    return inputVariables
+
+    return results
 }
 
 export const removeDuplicateURL = (message) => {
@@ -819,6 +1067,18 @@ export const kFormatter = (num) => {
     return item ? (num / item.value).toFixed(1).replace(regexp, '').concat(item.symbol) : '0'
 }
 
+export const redirectWhenUnauthorized = ({ error, redirectTo }) => {
+    if (error === 'unauthorized') {
+        window.location.href = redirectTo
+    } else if (error === 'subscription_canceled') {
+        window.location.href = `${redirectTo}?error=${error}`
+    }
+}
+
+export const truncateString = (str, maxLength) => {
+    return str.length > maxLength ? `${str.slice(0, maxLength - 3)}...` : str
+}
+
 const toCamelCase = (str) => {
     return str
         .split(' ') // Split by space to process each word
@@ -831,7 +1091,7 @@ const createJsonArray = (labels) => {
         return {
             label: label,
             name: toCamelCase(label),
-            baseClasses: ['Agent', 'LLMNode', 'ToolNode'],
+            baseClasses: ['Condition'],
             isAnchor: true
         }
     })
@@ -929,4 +1189,167 @@ export const getCustomConditionOutputs = (value, nodeId, existingEdges, isDataGr
     const toBeRemovedEdgeIds = existingEdges.filter((edge) => !newEdgeSourceHandles.includes(edge.sourceHandle)).map((edge) => edge.id)
 
     return { outputAnchors, toBeRemovedEdgeIds }
+}
+
+const _showHideOperation = (nodeData, inputParam, displayType, index) => {
+    const displayOptions = inputParam[displayType]
+    /* For example:
+    show: {
+        enableMemory: true
+    }
+    */
+    Object.keys(displayOptions).forEach((path) => {
+        const comparisonValue = displayOptions[path]
+        if (path.includes('$index')) {
+            path = path.replace('$index', index)
+        }
+        let groundValue = get(nodeData.inputs, path, '')
+        if (groundValue && typeof groundValue === 'string' && groundValue.startsWith('[') && groundValue.endsWith(']')) {
+            groundValue = JSON.parse(groundValue)
+        }
+
+        // Handle case where groundValue is an array
+        if (Array.isArray(groundValue)) {
+            if (Array.isArray(comparisonValue)) {
+                // Both are arrays - check if there's any intersection
+                const hasIntersection = comparisonValue.some((val) => groundValue.includes(val))
+                if (displayType === 'show' && !hasIntersection) {
+                    inputParam.display = false
+                }
+                if (displayType === 'hide' && hasIntersection) {
+                    inputParam.display = false
+                }
+            } else if (typeof comparisonValue === 'string') {
+                // comparisonValue is string, groundValue is array - check if array contains the string
+                const matchFound = groundValue.some((val) => comparisonValue === val || new RegExp(comparisonValue).test(val))
+                if (displayType === 'show' && !matchFound) {
+                    inputParam.display = false
+                }
+                if (displayType === 'hide' && matchFound) {
+                    inputParam.display = false
+                }
+            } else if (typeof comparisonValue === 'boolean' || typeof comparisonValue === 'number') {
+                // For boolean/number comparison with array, check if array contains the value
+                const matchFound = groundValue.includes(comparisonValue)
+                if (displayType === 'show' && !matchFound) {
+                    inputParam.display = false
+                }
+                if (displayType === 'hide' && matchFound) {
+                    inputParam.display = false
+                }
+            } else if (typeof comparisonValue === 'object') {
+                // For object comparison with array, use deep equality check
+                const matchFound = groundValue.some((val) => isEqual(comparisonValue, val))
+                if (displayType === 'show' && !matchFound) {
+                    inputParam.display = false
+                }
+                if (displayType === 'hide' && matchFound) {
+                    inputParam.display = false
+                }
+            }
+        } else {
+            // Original logic for non-array groundValue
+            if (Array.isArray(comparisonValue)) {
+                if (displayType === 'show' && !comparisonValue.includes(groundValue)) {
+                    inputParam.display = false
+                }
+                if (displayType === 'hide' && comparisonValue.includes(groundValue)) {
+                    inputParam.display = false
+                }
+            } else if (typeof comparisonValue === 'string') {
+                if (displayType === 'show' && !(comparisonValue === groundValue || new RegExp(comparisonValue).test(groundValue))) {
+                    inputParam.display = false
+                }
+                if (displayType === 'hide' && (comparisonValue === groundValue || new RegExp(comparisonValue).test(groundValue))) {
+                    inputParam.display = false
+                }
+            } else if (typeof comparisonValue === 'boolean') {
+                if (displayType === 'show' && comparisonValue !== groundValue) {
+                    inputParam.display = false
+                }
+                if (displayType === 'hide' && comparisonValue === groundValue) {
+                    inputParam.display = false
+                }
+            } else if (typeof comparisonValue === 'object') {
+                if (displayType === 'show' && !isEqual(comparisonValue, groundValue)) {
+                    inputParam.display = false
+                }
+                if (displayType === 'hide' && isEqual(comparisonValue, groundValue)) {
+                    inputParam.display = false
+                }
+            } else if (typeof comparisonValue === 'number') {
+                if (displayType === 'show' && comparisonValue !== groundValue) {
+                    inputParam.display = false
+                }
+                if (displayType === 'hide' && comparisonValue === groundValue) {
+                    inputParam.display = false
+                }
+            }
+        }
+    })
+}
+
+const _inputsWithDeclaredDefaults = (params, inputs) => {
+    const merged = { ...(inputs ?? {}) }
+    for (let i = 0; i < params.length; i += 1) {
+        const param = params[i]
+        if (!param || param.default === undefined) continue
+        if (merged[param.name] === undefined) {
+            merged[param.name] = param.default
+        }
+    }
+    return merged
+}
+
+export const showHideInputs = (nodeData, inputType, overrideParams, arrayIndex) => {
+    const params = overrideParams ?? nodeData[inputType] ?? []
+    const effectiveNodeData = { ...nodeData, inputs: _inputsWithDeclaredDefaults(params, nodeData.inputs) }
+
+    for (let i = 0; i < params.length; i += 1) {
+        const inputParam = params[i]
+
+        // Reset display flag to false for each inputParam
+        inputParam.display = true
+
+        if (inputParam.show) {
+            _showHideOperation(effectiveNodeData, inputParam, 'show', arrayIndex)
+        }
+        if (inputParam.hide) {
+            _showHideOperation(effectiveNodeData, inputParam, 'hide', arrayIndex)
+        }
+
+        // Filter individual options within dropdowns based on their own show/hide conditions
+        if (inputParam.type === 'options' && inputParam.options) {
+            inputParam.options = inputParam.options.filter((opt) => {
+                if (typeof opt === 'string' || (!opt.show && !opt.hide)) return true
+                const synthetic = { show: opt.show, hide: opt.hide, display: true }
+                if (opt.show) _showHideOperation(nodeData, synthetic, 'show', arrayIndex)
+                if (opt.hide) _showHideOperation(nodeData, synthetic, 'hide', arrayIndex)
+                return synthetic.display !== false
+            })
+        }
+    }
+
+    return params
+}
+
+export const showHideInputParams = (nodeData) => {
+    return showHideInputs(nodeData, 'inputParams')
+}
+
+export const showHideInputAnchors = (nodeData) => {
+    return showHideInputs(nodeData, 'inputAnchors')
+}
+
+export const applyVisibleInputDefaults = (params, inputs) => {
+    const result = { ...(inputs ?? {}) }
+    const evaluated = showHideInputs({ inputs: result }, null, params)
+    for (let i = 0; i < evaluated.length; i += 1) {
+        const param = evaluated[i]
+        if (!param || param.default === undefined) continue
+        if (param.display === false) continue
+        if (result[param.name] !== undefined) continue
+        result[param.name] = param.default
+    }
+    return result
 }

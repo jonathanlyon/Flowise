@@ -1,8 +1,10 @@
-import { ChatOllama, ChatOllamaInput } from '@langchain/ollama'
+import { ChatOllamaInput } from '@langchain/ollama'
 import { BaseChatModelParams } from '@langchain/core/language_models/chat_models'
 import { BaseCache } from '@langchain/core/caches'
-import { INode, INodeData, INodeParams } from '../../../src/Interface'
-import { getBaseClasses } from '../../../src/utils'
+import { ICommonObject, IMultiModalOption, INode, INodeData, INodeParams } from '../../../src/Interface'
+import { getBaseClasses, getCredentialData, getCredentialParam } from '../../../src/utils'
+import { ChatOllama } from './FlowiseChatOllama'
+import { checkDenyList } from '../../../src/httpSecurity'
 
 class ChatOllama_ChatModels implements INode {
     label: string
@@ -17,14 +19,21 @@ class ChatOllama_ChatModels implements INode {
     inputs: INodeParams[]
 
     constructor() {
-        this.label = 'ChatOllama'
+        this.label = 'Ollama'
         this.name = 'chatOllama'
-        this.version = 3.0
+        this.version = 5.0
         this.type = 'ChatOllama'
         this.icon = 'Ollama.svg'
         this.category = 'Chat Models'
         this.description = 'Chat completion using open-source LLM on Ollama'
         this.baseClasses = [this.type, ...getBaseClasses(ChatOllama)]
+        this.credential = {
+            label: 'Connect Credential',
+            name: 'credential',
+            type: 'credential',
+            credentialNames: ['ollamaApi'],
+            optional: true
+        }
         this.inputs = [
             {
                 label: 'Cache',
@@ -53,6 +62,40 @@ class ChatOllama_ChatModels implements INode {
                 step: 0.1,
                 default: 0.9,
                 optional: true
+            },
+            {
+                label: 'Streaming',
+                name: 'streaming',
+                type: 'boolean',
+                default: true,
+                optional: true,
+                additionalParams: true
+            },
+            {
+                label: 'Allow Image Uploads',
+                name: 'allowImageUploads',
+                type: 'boolean',
+                description:
+                    'Allow image input. Refer to the <a href="https://docs.flowiseai.com/using-flowise/uploads#image" target="_blank">docs</a> for more details.',
+                default: false,
+                optional: true
+            },
+            {
+                label: 'Think',
+                name: 'think',
+                type: 'boolean',
+                description: 'Whether the model supports reasoning. Only applicable for reasoning models',
+                default: false,
+                optional: true
+            },
+            {
+                label: 'JSON Mode',
+                name: 'jsonMode',
+                type: 'boolean',
+                description:
+                    'Coerces model outputs to only return JSON. Specify in the system prompt to return JSON. Ex: Format all responses as JSON object',
+                optional: true,
+                additionalParams: true
             },
             {
                 label: 'Keep Alive',
@@ -187,7 +230,7 @@ class ChatOllama_ChatModels implements INode {
         ]
     }
 
-    async init(nodeData: INodeData): Promise<any> {
+    async init(nodeData: INodeData, _: string, options: ICommonObject): Promise<any> {
         const temperature = nodeData.inputs?.temperature as string
         const baseUrl = nodeData.inputs?.baseUrl as string
         const modelName = nodeData.inputs?.modelName as string
@@ -203,13 +246,21 @@ class ChatOllama_ChatModels implements INode {
         const repeatLastN = nodeData.inputs?.repeatLastN as string
         const repeatPenalty = nodeData.inputs?.repeatPenalty as string
         const tfsZ = nodeData.inputs?.tfsZ as string
+        const allowImageUploads = nodeData.inputs?.allowImageUploads as boolean
+        const jsonMode = nodeData.inputs?.jsonMode as boolean
+        const streaming = nodeData.inputs?.streaming as boolean
+        const think = nodeData.inputs?.think as boolean
 
         const cache = nodeData.inputs?.cache as BaseCache
 
+        const activeBaseUrl = baseUrl || 'http://localhost:11434'
+        await checkDenyList(activeBaseUrl)
+
         const obj: ChatOllamaInput & BaseChatModelParams = {
-            baseUrl,
+            baseUrl: activeBaseUrl,
             temperature: parseFloat(temperature),
-            model: modelName
+            model: modelName,
+            streaming: streaming ?? true
         }
 
         if (topP) obj.topP = parseFloat(topP)
@@ -225,8 +276,27 @@ class ChatOllama_ChatModels implements INode {
         if (tfsZ) obj.tfsZ = parseFloat(tfsZ)
         if (keepAlive) obj.keepAlive = keepAlive
         if (cache) obj.cache = cache
+        if (jsonMode) obj.format = 'json'
 
-        const model = new ChatOllama(obj)
+        if (think === true) obj.think = true
+        else obj.think = false
+
+        const multiModalOption: IMultiModalOption = {
+            image: {
+                allowImageUploads: allowImageUploads ?? false
+            }
+        }
+
+        const credentialData = await getCredentialData(nodeData.credential ?? '', options)
+        const ollamaApiKey = getCredentialParam('ollamaApiKey', credentialData, nodeData)
+        if (ollamaApiKey) {
+            obj.headers = new Headers({
+                Authorization: `Bearer ${ollamaApiKey}`
+            })
+        }
+
+        const model = new ChatOllama(nodeData.id, obj)
+        model.setMultiModalOption(multiModalOption)
         return model
     }
 }

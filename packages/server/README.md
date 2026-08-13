@@ -1,12 +1,12 @@
 <!-- markdownlint-disable MD030 -->
 
-# Flowise - Low-Code LLM apps builder
+# Flowise
 
 English | [中文](./README-ZH.md)
 
-![Flowise](https://github.com/FlowiseAI/Flowise/blob/main/images/flowise.gif?raw=true)
+<h3>Build AI Agents, Visually</h3>
 
-Drag & drop UI to build your customized LLM flow
+![Flowise](https://github.com/FlowiseAI/Flowise/blob/main/images/flowise_agentflow.gif?raw=true)
 
 ## ⚡Quick Start
 
@@ -21,15 +21,6 @@ Drag & drop UI to build your customized LLM flow
     ```
 
 3. Open [http://localhost:3000](http://localhost:3000)
-
-## 🔒 Authentication
-
-To enable app level authentication, add `FLOWISE_USERNAME` and `FLOWISE_PASSWORD` to the `.env` file:
-
-```
-FLOWISE_USERNAME=user
-FLOWISE_PASSWORD=1234
-```
 
 ## 🌱 Env Variables
 
@@ -50,7 +41,7 @@ cd Flowise/packages/server
 pnpm install
 ./node_modules/.bin/cypress install
 pnpm build
-#Only for writting new tests on local dev -> pnpm run cypress:open
+#Only for writing new tests on local dev -> pnpm run cypress:open
 pnpm run e2e
 ```
 
@@ -60,25 +51,42 @@ pnpm run e2e
 
 ## 🌐 Self Host
 
-### [Railway](https://docs.flowiseai.com/deployment/railway)
+-   [AWS](https://docs.flowiseai.com/deployment/aws)
+-   [Azure](https://docs.flowiseai.com/deployment/azure)
+-   [Digital Ocean](https://docs.flowiseai.com/deployment/digital-ocean)
+-   [GCP](https://docs.flowiseai.com/deployment/gcp)
+-   <details>
+      <summary>Others</summary>
 
-[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/YK7J0v)
+    -   [Railway](https://docs.flowiseai.com/deployment/railway)
 
-### [Render](https://docs.flowiseai.com/deployment/render)
+        [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/pn4G8S?referralCode=WVNPD9)
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://docs.flowiseai.com/deployment/render)
+    -   [Render](https://docs.flowiseai.com/deployment/render)
 
-### [AWS](https://docs.flowiseai.com/deployment/aws)
+        [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://docs.flowiseai.com/deployment/render)
 
-### [Azure](https://docs.flowiseai.com/deployment/azure)
+    -   [HuggingFace Spaces](https://docs.flowiseai.com/configuration/deployment/hugging-face)
 
-### [DigitalOcean](https://docs.flowiseai.com/deployment/digital-ocean)
+        <a href="https://huggingface.co/spaces/FlowiseAI/Flowise"><img src="https://huggingface.co/datasets/huggingface/badges/raw/main/open-in-hf-spaces-sm.svg" alt="HuggingFace Spaces"></a>
 
-### [GCP](https://docs.flowiseai.com/deployment/gcp)
+    -   [Elestio](https://elest.io/open-source/flowiseai)
 
-## 💻 Cloud Hosted
+        [![Deploy on Elestio](https://elest.io/images/logos/deploy-to-elestio-btn.png)](https://elest.io/open-source/flowiseai)
 
-Coming Soon
+    -   [Sealos](https://cloud.sealos.io/?openapp=system-template%3FtemplateName%3Dflowise)
+
+        [![](https://raw.githubusercontent.com/labring-actions/templates/main/Deploy-on-Sealos.svg)](https://cloud.sealos.io/?openapp=system-template%3FtemplateName%3Dflowise)
+
+    -   [RepoCloud](https://repocloud.io/details/?app_id=29)
+
+        [![Deploy on RepoCloud](https://d16t0pc4846x52.cloudfront.net/deploy.png)](https://repocloud.io/details/?app_id=29)
+
+      </details>
+
+## ☁️ Flowise Cloud
+
+[Get Started with Flowise Cloud](https://flowiseai.com/)
 
 ## 🙋 Support
 

@@ -1,5 +1,15 @@
-import { FlowiseMemory, ICommonObject, IMessage, INode, INodeData, INodeOutputsValue, INodeParams } from '../../../src/Interface'
+import {
+    FlowiseMemory,
+    ICommonObject,
+    IMessage,
+    INode,
+    INodeData,
+    INodeOutputsValue,
+    INodeParams,
+    IServerSideEventStreamer
+} from '../../../src/Interface'
 import { LLM, ChatMessage, SimpleChatEngine } from 'llamaindex'
+import { EvaluationRunTracerLlama } from '../../../evaluation/EvaluationRunTracerLlama'
 
 class SimpleChatEngine_LlamaIndex implements INode {
     label: string
@@ -14,6 +24,8 @@ class SimpleChatEngine_LlamaIndex implements INode {
     inputs: INodeParams[]
     outputs: INodeOutputsValue[]
     sessionId?: string
+    badge: string
+    deprecateMessage: string
 
     constructor(fields?: { sessionId?: string }) {
         this.label = 'Simple Chat Engine'
@@ -25,6 +37,8 @@ class SimpleChatEngine_LlamaIndex implements INode {
         this.description = 'Simple engine to handle back and forth conversations'
         this.baseClasses = [this.type]
         this.tags = ['LlamaIndex']
+        this.badge = 'DEPRECATING'
+        this.deprecateMessage = 'LlamaIndex integration is deprecated and will be removed in a future release.'
         this.inputs = [
             {
                 label: 'Chat Model',
@@ -69,6 +83,9 @@ class SimpleChatEngine_LlamaIndex implements INode {
 
         const chatEngine = new SimpleChatEngine({ llm: model })
 
+        // these are needed for evaluation runs
+        await EvaluationRunTracerLlama.injectEvaluationMetadata(nodeData, options, chatEngine)
+
         const msgs = (await memory.getChatMessages(this.sessionId, false, prependMessages)) as IMessage[]
         for (const message of msgs) {
             if (message.type === 'apiMessage') {
@@ -86,18 +103,24 @@ class SimpleChatEngine_LlamaIndex implements INode {
 
         let text = ''
         let isStreamingStarted = false
-        const isStreamingEnabled = options.socketIO && options.socketIOClientId
 
-        if (isStreamingEnabled) {
+        const shouldStreamResponse = options.shouldStreamResponse
+        const sseStreamer: IServerSideEventStreamer = options.sseStreamer as IServerSideEventStreamer
+        const chatId = options.chatId
+
+        if (shouldStreamResponse) {
             const stream = await chatEngine.chat({ message: input, chatHistory, stream: true })
             for await (const chunk of stream) {
                 text += chunk.response
                 if (!isStreamingStarted) {
                     isStreamingStarted = true
-                    options.socketIO.to(options.socketIOClientId).emit('start', chunk.response)
+                    if (sseStreamer) {
+                        sseStreamer.streamStartEvent(chatId, chunk.response)
+                    }
                 }
-
-                options.socketIO.to(options.socketIOClientId).emit('token', chunk.response)
+                if (sseStreamer) {
+                    sseStreamer.streamTokenEvent(chatId, chunk.response)
+                }
             }
         } else {
             const response = await chatEngine.chat({ message: input, chatHistory })

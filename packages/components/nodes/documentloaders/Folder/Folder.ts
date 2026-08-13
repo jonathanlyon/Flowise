@@ -1,12 +1,16 @@
 import { omit } from 'lodash'
-import { INode, INodeData, INodeParams } from '../../../src/Interface'
-import { TextSplitter } from 'langchain/text_splitter'
-import { TextLoader } from 'langchain/document_loaders/fs/text'
-import { DirectoryLoader } from 'langchain/document_loaders/fs/directory'
-import { JSONLoader } from 'langchain/document_loaders/fs/json'
+import { INode, INodeData, INodeOutputsValue, INodeParams } from '../../../src/Interface'
+import { TextSplitter } from '@langchain/textsplitters'
+import { TextLoader } from '@langchain/classic/document_loaders/fs/text'
+import { DirectoryLoader } from '@langchain/classic/document_loaders/fs/directory'
+import { JSONLinesLoader, JSONLoader } from '@langchain/classic/document_loaders/fs/json'
 import { CSVLoader } from '@langchain/community/document_loaders/fs/csv'
 import { PDFLoader } from '@langchain/community/document_loaders/fs/pdf'
 import { DocxLoader } from '@langchain/community/document_loaders/fs/docx'
+import { LoadOfSheet } from '../MicrosoftExcel/ExcelLoader'
+import { PowerpointLoader } from '../MicrosoftPowerpoint/PowerpointLoader'
+import { handleEscapeCharacters } from '../../../src/utils'
+import { isPathTraversal } from '../../../src/validator'
 
 class Folder_DocumentLoaders implements INode {
     label: string
@@ -18,11 +22,12 @@ class Folder_DocumentLoaders implements INode {
     category: string
     baseClasses: string[]
     inputs: INodeParams[]
+    outputs: INodeOutputsValue[]
 
     constructor() {
         this.label = 'Folder with Files'
         this.name = 'folderFiles'
-        this.version = 2.0
+        this.version = 4.0
         this.type = 'Document'
         this.icon = 'folder.svg'
         this.category = 'Document Loaders'
@@ -51,6 +56,7 @@ class Folder_DocumentLoaders implements INode {
                 label: 'Pdf Usage',
                 name: 'pdfUsage',
                 type: 'options',
+                description: 'Only when loading PDF files',
                 options: [
                     {
                         label: 'One document per page',
@@ -62,6 +68,15 @@ class Folder_DocumentLoaders implements INode {
                     }
                 ],
                 default: 'perPage',
+                optional: true,
+                additionalParams: true
+            },
+            {
+                label: 'JSONL Pointer Extraction',
+                name: 'pointerName',
+                type: 'string',
+                description: 'Only when loading JSONL files',
+                placeholder: '<pointerName>',
                 optional: true,
                 additionalParams: true
             },
@@ -85,6 +100,20 @@ class Folder_DocumentLoaders implements INode {
                 additionalParams: true
             }
         ]
+        this.outputs = [
+            {
+                label: 'Document',
+                name: 'document',
+                description: 'Array of document objects containing metadata and pageContent',
+                baseClasses: [...this.baseClasses, 'json']
+            },
+            {
+                label: 'Text',
+                name: 'text',
+                description: 'Concatenated string from pageContent of documents',
+                baseClasses: ['string', 'json']
+            }
+        ]
     }
 
     async init(nodeData: INodeData): Promise<any> {
@@ -93,7 +122,17 @@ class Folder_DocumentLoaders implements INode {
         const metadata = nodeData.inputs?.metadata
         const recursive = nodeData.inputs?.recursive as boolean
         const pdfUsage = nodeData.inputs?.pdfUsage
+        const pointerName = nodeData.inputs?.pointerName as string
         const _omitMetadataKeys = nodeData.inputs?.omitMetadataKeys as string
+        const output = nodeData.outputs?.output as string
+
+        if (!folderPath) {
+            throw new Error('Folder path is required')
+        }
+
+        if (isPathTraversal(folderPath)) {
+            throw new Error('Invalid folder path: Path traversal detected. Please provide a safe folder path.')
+        }
 
         let omitMetadataKeys: string[] = []
         if (_omitMetadataKeys) {
@@ -104,9 +143,17 @@ class Folder_DocumentLoaders implements INode {
             folderPath,
             {
                 '.json': (path) => new JSONLoader(path),
+                '.jsonl': (blob) => new JSONLinesLoader(blob, '/' + pointerName.trim()),
                 '.txt': (path) => new TextLoader(path),
                 '.csv': (path) => new CSVLoader(path),
+                '.xls': (path) => new LoadOfSheet(path),
+                '.xlsx': (path) => new LoadOfSheet(path),
+                '.xlsm': (path) => new LoadOfSheet(path),
+                '.xlsb': (path) => new LoadOfSheet(path),
+                '.doc': (path) => new DocxLoader(path),
                 '.docx': (path) => new DocxLoader(path),
+                '.ppt': (path) => new PowerpointLoader(path),
+                '.pptx': (path) => new PowerpointLoader(path),
                 '.pdf': (path) =>
                     pdfUsage === 'perFile'
                         ? // @ts-ignore
@@ -191,7 +238,15 @@ class Folder_DocumentLoaders implements INode {
             }))
         }
 
-        return docs
+        if (output === 'document') {
+            return docs
+        } else {
+            let finaltext = ''
+            for (const doc of docs) {
+                finaltext += `${doc.pageContent}\n`
+            }
+            return handleEscapeCharacters(finaltext, false)
+        }
     }
 }
 

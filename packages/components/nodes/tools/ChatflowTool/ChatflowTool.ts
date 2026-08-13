@@ -1,11 +1,17 @@
 import { DataSource } from 'typeorm'
-import { z } from 'zod'
-import { NodeVM } from 'vm2'
+import { z } from 'zod/v3'
 import { RunnableConfig } from '@langchain/core/runnables'
 import { CallbackManagerForToolRun, Callbacks, CallbackManager, parseCallbackConfigArg } from '@langchain/core/callbacks/manager'
 import { StructuredTool } from '@langchain/core/tools'
 import { ICommonObject, IDatabaseEntity, INode, INodeData, INodeOptionsValue, INodeParams } from '../../../src/Interface'
-import { availableDependencies, defaultAllowBuiltInDep, getCredentialData, getCredentialParam } from '../../../src/utils'
+import {
+    getCredentialData,
+    getCredentialParam,
+    executeJavaScriptCode,
+    createCodeExecutionSandbox,
+    parseWithTypeConversion
+} from '../../../src/utils'
+import { isValidUUID, isValidURL } from '../../../src/validator'
 import { v4 as uuidv4 } from 'uuid'
 
 class ChatflowTool_Tools implements INode {
@@ -23,7 +29,7 @@ class ChatflowTool_Tools implements INode {
     constructor() {
         this.label = 'Chatflow Tool'
         this.name = 'ChatflowTool'
-        this.version = 3.0
+        this.version = 5.1
         this.type = 'ChatflowTool'
         this.icon = 'chatflowTool.svg'
         this.category = 'Tools'
@@ -56,6 +62,21 @@ class ChatflowTool_Tools implements INode {
                 rows: 3,
                 placeholder:
                     'State of the Union QA - useful for when you need to ask questions about the most recent state of the union address.'
+            },
+            {
+                label: 'Return Direct',
+                name: 'returnDirect',
+                type: 'boolean',
+                optional: true
+            },
+            {
+                label: 'Override Config',
+                name: 'overrideConfig',
+                description: 'Override the config passed to the Chatflow.',
+                type: 'json',
+                optional: true,
+                additionalParams: true,
+                acceptVariable: true
             },
             {
                 label: 'Base URL',
@@ -92,7 +113,10 @@ class ChatflowTool_Tools implements INode {
                 type: 'string',
                 description: 'Custom input to be passed to the chatflow. Leave empty to let LLM decides the input.',
                 optional: true,
-                additionalParams: true
+                additionalParams: true,
+                show: {
+                    useQuestionFromChat: false
+                }
             }
         ]
     }
@@ -108,12 +132,24 @@ class ChatflowTool_Tools implements INode {
                 return returnData
             }
 
-            const chatflows = await appDataSource.getRepository(databaseEntities['ChatFlow']).find()
+            const searchOptions = options.searchOptions || {}
+            const chatflows = await appDataSource.getRepository(databaseEntities['ChatFlow']).findBy(searchOptions)
 
             for (let i = 0; i < chatflows.length; i += 1) {
+                let type = chatflows[i].type
+                if (type === 'AGENTFLOW') {
+                    type = 'AgentflowV2'
+                } else if (type === 'MULTIAGENT') {
+                    type = 'AgentflowV1'
+                } else if (type === 'ASSISTANT') {
+                    type = 'Custom Assistant'
+                } else {
+                    type = 'Chatflow'
+                }
                 const data = {
                     label: chatflows[i].name,
-                    name: chatflows[i].id
+                    name: chatflows[i].id,
+                    description: type
                 } as INodeOptionsValue
                 returnData.push(data)
             }
@@ -126,11 +162,28 @@ class ChatflowTool_Tools implements INode {
         const _name = nodeData.inputs?.name as string
         const description = nodeData.inputs?.description as string
         const useQuestionFromChat = nodeData.inputs?.useQuestionFromChat as boolean
+        const returnDirect = nodeData.inputs?.returnDirect as boolean
         const customInput = nodeData.inputs?.customInput as string
+        const overrideConfig =
+            typeof nodeData.inputs?.overrideConfig === 'string' &&
+            nodeData.inputs.overrideConfig.startsWith('{') &&
+            nodeData.inputs.overrideConfig.endsWith('}')
+                ? JSON.parse(nodeData.inputs.overrideConfig)
+                : nodeData.inputs?.overrideConfig
 
         const startNewSession = nodeData.inputs?.startNewSession as boolean
 
         const baseURL = (nodeData.inputs?.baseURL as string) || (options.baseURL as string)
+
+        // Validate selectedChatflowId is a valid UUID
+        if (!selectedChatflowId || !isValidUUID(selectedChatflowId)) {
+            throw new Error('Invalid chatflow ID: must be a valid UUID')
+        }
+
+        // Validate baseURL is a valid URL
+        if (!baseURL || !isValidURL(baseURL)) {
+            throw new Error('Invalid base URL: must be a valid URL')
+        }
 
         const credentialData = await getCredentialData(nodeData.credential ?? '', options)
         const chatflowApiKey = getCredentialParam('chatflowApiKey', credentialData, nodeData)
@@ -143,13 +196,23 @@ class ChatflowTool_Tools implements INode {
         let toolInput = ''
         if (useQuestionFromChat) {
             toolInput = input
-        } else if (!customInput) {
+        } else if (customInput) {
             toolInput = customInput
         }
 
         let name = _name || 'chatflow_tool'
 
-        return new ChatflowTool({ name, baseURL, description, chatflowid: selectedChatflowId, startNewSession, headers, input: toolInput })
+        return new ChatflowTool({
+            name,
+            baseURL,
+            description,
+            returnDirect,
+            chatflowid: selectedChatflowId,
+            startNewSession,
+            headers,
+            input: toolInput,
+            overrideConfig
+        })
     }
 }
 
@@ -172,26 +235,33 @@ class ChatflowTool extends StructuredTool {
 
     headers = {}
 
+    overrideConfig?: object
+
     schema = z.object({
         input: z.string().describe('input question')
+        // overrideConfig: z.record(z.any()).optional().describe('override config'), // This will be passed to the Agent, so comment it for now.
     }) as any
 
     constructor({
         name,
         description,
+        returnDirect,
         input,
         chatflowid,
         startNewSession,
         baseURL,
-        headers
+        headers,
+        overrideConfig
     }: {
         name: string
         description: string
+        returnDirect: boolean
         input: string
         chatflowid: string
         startNewSession: boolean
         baseURL: string
         headers: ICommonObject
+        overrideConfig?: object
     }) {
         super()
         this.name = name
@@ -201,6 +271,8 @@ class ChatflowTool extends StructuredTool {
         this.startNewSession = startNewSession
         this.headers = headers
         this.chatflowid = chatflowid
+        this.overrideConfig = overrideConfig
+        this.returnDirect = returnDirect
     }
 
     async call(
@@ -215,7 +287,7 @@ class ChatflowTool extends StructuredTool {
         }
         let parsed
         try {
-            parsed = await this.schema.parseAsync(arg)
+            parsed = await parseWithTypeConversion(this.schema, arg)
         } catch (e) {
             throw new Error(`Received tool input did not match expected schema: ${JSON.stringify(arg)}`)
         }
@@ -244,6 +316,9 @@ class ChatflowTool extends StructuredTool {
             await runManager?.handleToolError(e)
             throw e
         }
+        if (result && typeof result !== 'string') {
+            result = JSON.stringify(result)
+        }
         await runManager?.handleToolEnd(result)
         return result
     }
@@ -260,7 +335,9 @@ class ChatflowTool extends StructuredTool {
             question: inputQuestion,
             chatId: this.startNewSession ? uuidv4() : flowConfig?.chatId,
             overrideConfig: {
-                sessionId: this.startNewSession ? uuidv4() : flowConfig?.sessionId
+                sessionId: this.startNewSession ? uuidv4() : flowConfig?.sessionId,
+                ...(this.overrideConfig ?? {}),
+                ...(arg.overrideConfig ?? {})
             }
         }
 
@@ -268,16 +345,15 @@ class ChatflowTool extends StructuredTool {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
+                'flowise-tool': 'true',
                 ...this.headers
             },
             body: JSON.stringify(body)
         }
 
-        let sandbox = { $callOptions: options, $callBody: body }
-
         const code = `
 const fetch = require('node-fetch');
-const url = "${this.baseURL}/api/v1/prediction/${this.chatflowid}";
+const url = $apiURL;
 
 const body = $callBody;
 
@@ -292,23 +368,23 @@ try {
 	return '';
 }
 `
-        const builtinDeps = process.env.TOOL_FUNCTION_BUILTIN_DEP
-            ? defaultAllowBuiltInDep.concat(process.env.TOOL_FUNCTION_BUILTIN_DEP.split(','))
-            : defaultAllowBuiltInDep
-        const externalDeps = process.env.TOOL_FUNCTION_EXTERNAL_DEP ? process.env.TOOL_FUNCTION_EXTERNAL_DEP.split(',') : []
-        const deps = availableDependencies.concat(externalDeps)
 
-        const vmOptions = {
-            console: 'inherit',
-            sandbox,
-            require: {
-                external: { modules: deps },
-                builtin: builtinDeps
-            }
-        } as any
+        // Create additional sandbox variables
+        const additionalSandbox: ICommonObject = {
+            $callOptions: options,
+            $callBody: body,
+            $apiURL: `${this.baseURL}/api/v1/prediction/${this.chatflowid}`
+        }
 
-        const vm = new NodeVM(vmOptions)
-        const response = await vm.run(`module.exports = async function() {${code}}()`, __dirname)
+        const sandbox = createCodeExecutionSandbox('', [], {}, additionalSandbox)
+
+        let response = await executeJavaScriptCode(code, sandbox, {
+            useSandbox: false
+        })
+
+        if (typeof response === 'object') {
+            response = JSON.stringify(response)
+        }
 
         return response
     }

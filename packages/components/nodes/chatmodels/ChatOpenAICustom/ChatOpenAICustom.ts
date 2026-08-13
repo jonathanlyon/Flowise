@@ -1,8 +1,8 @@
-import { ChatOpenAI, OpenAIChatInput } from '@langchain/openai'
+import { ChatOpenAI, ChatOpenAIFields } from '@langchain/openai'
 import { BaseCache } from '@langchain/core/caches'
-import { BaseLLMParams } from '@langchain/core/language_models/llms'
 import { ICommonObject, INode, INodeData, INodeParams } from '../../../src/Interface'
 import { getBaseClasses, getCredentialData, getCredentialParam } from '../../../src/utils'
+import { checkDenyList } from '../../../src/httpSecurity'
 
 class ChatOpenAICustom_ChatModels implements INode {
     label: string
@@ -17,9 +17,9 @@ class ChatOpenAICustom_ChatModels implements INode {
     inputs: INodeParams[]
 
     constructor() {
-        this.label = 'ChatOpenAI Custom'
+        this.label = 'OpenAI Custom Model'
         this.name = 'chatOpenAICustom'
-        this.version = 3.0
+        this.version = 4.0
         this.type = 'ChatOpenAI-Custom'
         this.icon = 'openai.svg'
         this.category = 'Chat Models'
@@ -52,6 +52,14 @@ class ChatOpenAICustom_ChatModels implements INode {
                 step: 0.1,
                 default: 0.9,
                 optional: true
+            },
+            {
+                label: 'Streaming',
+                name: 'streaming',
+                type: 'boolean',
+                default: true,
+                optional: true,
+                additionalParams: true
             },
             {
                 label: 'Max Tokens',
@@ -94,17 +102,19 @@ class ChatOpenAICustom_ChatModels implements INode {
                 additionalParams: true
             },
             {
-                label: 'BasePath',
+                label: 'Base Path',
                 name: 'basepath',
                 type: 'string',
                 optional: true,
+                description: 'Override the default base URL for the API, e.g., "https://api.example.com/v2/',
                 additionalParams: true
             },
             {
-                label: 'BaseOptions',
+                label: 'Base Options',
                 name: 'baseOptions',
                 type: 'json',
                 optional: true,
+                description: 'Default headers to include with every request to the API.',
                 additionalParams: true
             }
         ]
@@ -126,10 +136,11 @@ class ChatOpenAICustom_ChatModels implements INode {
         const credentialData = await getCredentialData(nodeData.credential ?? '', options)
         const openAIApiKey = getCredentialParam('openAIApiKey', credentialData, nodeData)
 
-        const obj: Partial<OpenAIChatInput> & BaseLLMParams & { openAIApiKey?: string } = {
+        const obj: ChatOpenAIFields = {
             temperature: parseFloat(temperature),
             modelName,
             openAIApiKey,
+            apiKey: openAIApiKey,
             streaming: streaming ?? true
         }
 
@@ -149,10 +160,17 @@ class ChatOpenAICustom_ChatModels implements INode {
                 throw new Error("Invalid JSON in the ChatOpenAI's BaseOptions: " + exception)
             }
         }
-        const model = new ChatOpenAI(obj, {
-            basePath,
-            baseOptions: parsedBaseOptions
-        })
+
+        if (basePath) await checkDenyList(basePath)
+
+        if (basePath || parsedBaseOptions) {
+            obj.configuration = {
+                baseURL: basePath,
+                defaultHeaders: parsedBaseOptions
+            }
+        }
+
+        const model = new ChatOpenAI(obj)
         return model
     }
 }

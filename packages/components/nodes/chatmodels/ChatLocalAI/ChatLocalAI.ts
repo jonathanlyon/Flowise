@@ -1,8 +1,8 @@
-import { OpenAIChatInput, ChatOpenAI } from '@langchain/openai'
+import { ChatOpenAI, ChatOpenAIFields } from '@langchain/openai'
 import { BaseCache } from '@langchain/core/caches'
-import { BaseLLMParams } from '@langchain/core/language_models/llms'
 import { ICommonObject, INode, INodeData, INodeParams } from '../../../src/Interface'
 import { getBaseClasses, getCredentialData, getCredentialParam } from '../../../src/utils'
+import { checkDenyList } from '../../../src/httpSecurity'
 
 class ChatLocalAI_ChatModels implements INode {
     label: string
@@ -17,9 +17,9 @@ class ChatLocalAI_ChatModels implements INode {
     inputs: INodeParams[]
 
     constructor() {
-        this.label = 'ChatLocalAI'
+        this.label = 'LocalAI'
         this.name = 'chatLocalAI'
-        this.version = 2.0
+        this.version = 3.0
         this.type = 'ChatLocalAI'
         this.icon = 'localai.png'
         this.category = 'Chat Models'
@@ -60,6 +60,14 @@ class ChatLocalAI_ChatModels implements INode {
                 optional: true
             },
             {
+                label: 'Streaming',
+                name: 'streaming',
+                type: 'boolean',
+                default: true,
+                optional: true,
+                additionalParams: true
+            },
+            {
                 label: 'Max Tokens',
                 name: 'maxTokens',
                 type: 'number',
@@ -93,24 +101,35 @@ class ChatLocalAI_ChatModels implements INode {
         const topP = nodeData.inputs?.topP as string
         const timeout = nodeData.inputs?.timeout as string
         const basePath = nodeData.inputs?.basePath as string
+        const streaming = nodeData.inputs?.streaming as boolean
+
         const credentialData = await getCredentialData(nodeData.credential ?? '', options)
         const localAIApiKey = getCredentialParam('localAIApiKey', credentialData, nodeData)
 
         const cache = nodeData.inputs?.cache as BaseCache
 
-        const obj: Partial<OpenAIChatInput> & BaseLLMParams & { openAIApiKey?: string } = {
+        const obj: ChatOpenAIFields = {
             temperature: parseFloat(temperature),
             modelName,
-            openAIApiKey: 'sk-'
+            openAIApiKey: 'sk-',
+            apiKey: 'sk-',
+            streaming: streaming ?? true
         }
 
         if (maxTokens) obj.maxTokens = parseInt(maxTokens, 10)
         if (topP) obj.topP = parseFloat(topP)
         if (timeout) obj.timeout = parseInt(timeout, 10)
         if (cache) obj.cache = cache
-        if (localAIApiKey) obj.openAIApiKey = localAIApiKey
+        if (localAIApiKey) {
+            obj.openAIApiKey = localAIApiKey
+            obj.apiKey = localAIApiKey
+        }
+        if (basePath) {
+            await checkDenyList(basePath)
+            obj.configuration = { baseURL: basePath }
+        }
 
-        const model = new ChatOpenAI(obj, { basePath })
+        const model = new ChatOpenAI(obj)
 
         return model
     }

@@ -4,7 +4,7 @@ import PropTypes from 'prop-types'
 import { enqueueSnackbar as enqueueSnackbarAction, closeSnackbar as closeSnackbarAction, SET_CHATFLOW } from '@/store/actions'
 
 // material-ui
-import { Button, IconButton, OutlinedInput, Box, List, InputAdornment, Typography } from '@mui/material'
+import { Button, IconButton, OutlinedInput, Box, InputAdornment, Stack, Typography } from '@mui/material'
 import { IconX, IconTrash, IconPlus } from '@tabler/icons-react'
 
 // Project import
@@ -17,7 +17,7 @@ import useNotifier from '@/utils/useNotifier'
 // API
 import chatflowsApi from '@/api/chatflows'
 
-const AllowedDomains = ({ dialogProps }) => {
+const AllowedDomains = ({ dialogProps, onConfirm, hideTitle = false }) => {
     const dispatch = useDispatch()
 
     useNotifier()
@@ -72,6 +72,7 @@ const AllowedDomains = ({ dialogProps }) => {
                     }
                 })
                 dispatch({ type: SET_CHATFLOW, chatflow: saveResp.data })
+                onConfirm?.()
             }
         } catch (error) {
             enqueueSnackbar({
@@ -118,23 +119,19 @@ const AllowedDomains = ({ dialogProps }) => {
     }, [dialogProps])
 
     return (
-        <>
-            <Box>
-                <Box
-                    sx={{
-                        display: 'flex',
-                        flexDirection: 'column'
-                    }}
-                >
-                    <Typography sx={{ mb: 1 }}>
-                        Allowed Domains
-                        <TooltipWithParser
-                            style={{ mb: 1, mt: 2, marginLeft: 10 }}
-                            title={'Your chatbot will only work when used from the following domains.'}
-                        />
-                    </Typography>
-                </Box>
-                <List>
+        <Stack direction='column' spacing={2} sx={{ width: '100%' }}>
+            {!hideTitle && (
+                <Typography variant='h3'>
+                    Allowed Domains
+                    <TooltipWithParser
+                        style={{ mb: 1, mt: 2, marginLeft: 10 }}
+                        title={'Your chatbot will only work when used from the following domains.'}
+                    />
+                </Typography>
+            )}
+            <Stack direction='column' spacing={2} sx={{ width: '100%' }}>
+                <Stack direction='column' spacing={2}>
+                    <Typography>Domains</Typography>
                     {inputFields.map((origin, index) => {
                         return (
                             <div key={index} style={{ display: 'flex', width: '100%' }}>
@@ -176,11 +173,9 @@ const AllowedDomains = ({ dialogProps }) => {
                             </div>
                         )
                     })}
-                </List>
-            </Box>
-            <Box sx={{ pt: 2, pb: 2 }}>
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
-                    <Typography sx={{ mb: 1 }}>
+                </Stack>
+                <Stack direction='column' spacing={1}>
+                    <Typography>
                         Error Message
                         <TooltipWithParser
                             style={{ mb: 1, mt: 2, marginLeft: 10 }}
@@ -198,17 +193,21 @@ const AllowedDomains = ({ dialogProps }) => {
                             setErrorMessage(e.target.value)
                         }}
                     />
-                </div>
+                </Stack>
+            </Stack>
+            <Box sx={{ display: 'flex', justifyContent: 'flex-end', width: '100%', mt: 2 }}>
+                <StyledButton variant='contained' onClick={onSave} sx={{ minWidth: 100 }}>
+                    Save
+                </StyledButton>
             </Box>
-            <StyledButton variant='contained' onClick={onSave}>
-                Save
-            </StyledButton>
-        </>
+        </Stack>
     )
 }
 
 AllowedDomains.propTypes = {
-    dialogProps: PropTypes.object
+    dialogProps: PropTypes.object,
+    onConfirm: PropTypes.func,
+    hideTitle: PropTypes.bool
 }
 
 export default AllowedDomains

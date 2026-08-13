@@ -1,7 +1,3 @@
-/*
-* Temporary disabled due to the incompatibility with the docker node-alpine:
-* https://github.com/FlowiseAI/Flowise/pull/2303
-
 import { INodeParams, INodeCredential } from '../src/Interface'
 
 class CouchbaseApi implements INodeCredential {
@@ -19,7 +15,7 @@ class CouchbaseApi implements INodeCredential {
             {
                 label: 'Couchbase Connection String',
                 name: 'connectionString',
-                type: 'string'
+                type: 'url'
             },
             {
                 label: 'Couchbase Username',
@@ -36,4 +32,3 @@ class CouchbaseApi implements INodeCredential {
 }
 
 module.exports = { credClass: CouchbaseApi }
-*/

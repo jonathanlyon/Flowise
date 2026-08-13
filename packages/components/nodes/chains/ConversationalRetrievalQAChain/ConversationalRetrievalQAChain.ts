@@ -8,11 +8,10 @@ import { BaseMessage, HumanMessage, AIMessage } from '@langchain/core/messages'
 import { ConsoleCallbackHandler as LCConsoleCallbackHandler } from '@langchain/core/tracers/console'
 import { checkInputs, Moderation, streamResponse } from '../../moderation/Moderation'
 import { formatResponse } from '../../outputparsers/OutputParserHelpers'
-import { StringOutputParser } from '@langchain/core/output_parsers'
 import type { Document } from '@langchain/core/documents'
-import { BufferMemoryInput } from 'langchain/memory'
-import { ConversationalRetrievalQAChain } from 'langchain/chains'
-import { getBaseClasses, mapChatMessageToBaseMessage } from '../../../src/utils'
+import { BufferMemoryInput } from '@langchain/classic/memory'
+import { ConversationalRetrievalQAChain } from '@langchain/classic/chains'
+import { getBaseClasses, mapChatMessageToBaseMessage, createTextOnlyOutputParser } from '../../../src/utils'
 import { ConsoleCallbackHandler, additionalCallbacks } from '../../../src/handler'
 import {
     FlowiseMemory,
@@ -22,7 +21,8 @@ import {
     INodeData,
     INodeParams,
     IDatabaseEntity,
-    MemoryMethods
+    MemoryMethods,
+    IServerSideEventStreamer
 } from '../../../src/Interface'
 import { QA_TEMPLATE, REPHRASE_TEMPLATE, RESPONSE_TEMPLATE } from './prompts'
 
@@ -181,6 +181,11 @@ class ConversationalRetrievalQAChain_Chains implements INode {
         const databaseEntities = options.databaseEntities as IDatabaseEntity
         const chatflowid = options.chatflowid as string
 
+        const shouldStreamResponse = options.shouldStreamResponse
+        const sseStreamer: IServerSideEventStreamer = options.sseStreamer as IServerSideEventStreamer
+        const chatId = options.chatId
+        const orgId = options.orgId
+
         let customResponsePrompt = responsePrompt
         // If the deprecated systemMessagePrompt is still exists
         if (systemMessagePrompt) {
@@ -195,7 +200,8 @@ class ConversationalRetrievalQAChain_Chains implements INode {
                 memoryKey: 'chat_history',
                 appDataSource,
                 databaseEntities,
-                chatflowid
+                chatflowid,
+                orgId
             })
         }
 
@@ -205,7 +211,9 @@ class ConversationalRetrievalQAChain_Chains implements INode {
                 input = await checkInputs(moderations, input)
             } catch (e) {
                 await new Promise((resolve) => setTimeout(resolve, 500))
-                streamResponse(options.socketIO && options.socketIOClientId, e.message, options.socketIO, options.socketIOClientId)
+                if (options.shouldStreamResponse) {
+                    streamResponse(options.sseStreamer, options.chatId, e.message)
+                }
                 return formatResponse(e.message)
             }
         }
@@ -213,7 +221,7 @@ class ConversationalRetrievalQAChain_Chains implements INode {
 
         const history = ((await memory.getChatMessages(this.sessionId, false, prependMessages)) as IMessage[]) ?? []
 
-        const loggerHandler = new ConsoleCallbackHandler(options.logger)
+        const loggerHandler = new ConsoleCallbackHandler(options.logger, options?.orgId)
         const additionalCallback = await additionalCallbacks(nodeData, options)
 
         let callbacks = [loggerHandler, ...additionalCallback]
@@ -234,18 +242,22 @@ class ConversationalRetrievalQAChain_Chains implements INode {
         let sourceDocuments: ICommonObject[] = []
         let text = ''
         let isStreamingStarted = false
-        const isStreamingEnabled = options.socketIO && options.socketIOClientId
 
         for await (const chunk of stream) {
             streamedResponse = applyPatch(streamedResponse, chunk.ops).newDocument
 
             if (streamedResponse.final_output) {
                 text = streamedResponse.final_output?.output
-                if (isStreamingEnabled) options.socketIO.to(options.socketIOClientId).emit('end')
                 if (Array.isArray(streamedResponse?.logs?.[sourceRunnableName]?.final_output?.output)) {
                     sourceDocuments = streamedResponse?.logs?.[sourceRunnableName]?.final_output?.output
-                    if (isStreamingEnabled && returnSourceDocuments)
-                        options.socketIO.to(options.socketIOClientId).emit('sourceDocuments', sourceDocuments)
+                    if (shouldStreamResponse && returnSourceDocuments) {
+                        if (sseStreamer) {
+                            sseStreamer.streamSourceDocumentsEvent(chatId, sourceDocuments)
+                        }
+                    }
+                }
+                if (shouldStreamResponse && sseStreamer) {
+                    sseStreamer.streamEndEvent(chatId)
                 }
             }
 
@@ -258,9 +270,17 @@ class ConversationalRetrievalQAChain_Chains implements INode {
 
                 if (!isStreamingStarted) {
                     isStreamingStarted = true
-                    if (isStreamingEnabled) options.socketIO.to(options.socketIOClientId).emit('start', token)
+                    if (shouldStreamResponse) {
+                        if (sseStreamer) {
+                            sseStreamer.streamStartEvent(chatId, token)
+                        }
+                    }
                 }
-                if (isStreamingEnabled) options.socketIO.to(options.socketIOClientId).emit('token', token)
+                if (shouldStreamResponse) {
+                    if (sseStreamer) {
+                        sseStreamer.streamTokenEvent(chatId, token)
+                    }
+                }
             }
         }
 
@@ -287,7 +307,7 @@ const createRetrieverChain = (llm: BaseLanguageModel, retriever: Runnable, rephr
     // Small speed/accuracy optimization: no need to rephrase the first question
     // since there shouldn't be any meta-references to prior chat history
     const CONDENSE_QUESTION_PROMPT = PromptTemplate.fromTemplate(rephrasePrompt)
-    const condenseQuestionChain = RunnableSequence.from([CONDENSE_QUESTION_PROMPT, llm, new StringOutputParser()]).withConfig({
+    const condenseQuestionChain = RunnableSequence.from([CONDENSE_QUESTION_PROMPT, llm, createTextOnlyOutputParser()]).withConfig({
         runName: 'CondenseQuestion'
     })
 
@@ -364,7 +384,7 @@ const createChain = (
         ['human', `{question}`]
     ])
 
-    const responseSynthesizerChain = RunnableSequence.from([prompt, llm, new StringOutputParser()]).withConfig({
+    const responseSynthesizerChain = RunnableSequence.from([prompt, llm, createTextOnlyOutputParser()]).withConfig({
         tags: ['GenerateResponse']
     })
 
@@ -388,18 +408,21 @@ interface BufferMemoryExtendedInput {
     appDataSource: DataSource
     databaseEntities: IDatabaseEntity
     chatflowid: string
+    orgId: string
 }
 
 class BufferMemory extends FlowiseMemory implements MemoryMethods {
     appDataSource: DataSource
     databaseEntities: IDatabaseEntity
     chatflowid: string
+    orgId: string
 
     constructor(fields: BufferMemoryInput & BufferMemoryExtendedInput) {
         super(fields)
         this.appDataSource = fields.appDataSource
         this.databaseEntities = fields.databaseEntities
         this.chatflowid = fields.chatflowid
+        this.orgId = fields.orgId
     }
 
     async getChatMessages(
@@ -424,7 +447,7 @@ class BufferMemory extends FlowiseMemory implements MemoryMethods {
         }
 
         if (returnBaseMessages) {
-            return mapChatMessageToBaseMessage(chatMessage)
+            return await mapChatMessageToBaseMessage(chatMessage, this.orgId)
         }
 
         let returnIMessages: IMessage[] = []

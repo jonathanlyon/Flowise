@@ -1,7 +1,7 @@
 import fetch from 'node-fetch'
 import { Document } from '@langchain/core/documents'
 import { VectaraStore } from '@langchain/community/vectorstores/vectara'
-import { VectorDBQAChain } from 'langchain/chains'
+import { VectorDBQAChain } from '@langchain/classic/chains'
 import { INode, INodeData, INodeParams } from '../../../src/Interface'
 import { getBaseClasses } from '../../../src/utils'
 import { checkInputs, Moderation } from '../../moderation/Moderation'
@@ -269,7 +269,9 @@ class VectaraChain_Chains implements INode {
                 input = await checkInputs(moderations, input)
             } catch (e) {
                 await new Promise((resolve) => setTimeout(resolve, 500))
-                //streamResponse(options.socketIO && options.socketIOClientId, e.message, options.socketIO, options.socketIOClientId)
+                // if (options.shouldStreamResponse) {
+                //     streamResponse(options.sseStreamer, options.chatId, e.message)
+                // }
                 return formatResponse(e.message)
             }
         }

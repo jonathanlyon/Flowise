@@ -1,22 +1,23 @@
 import OpenAI from 'openai'
-import fs from 'fs'
 import { StatusCodes } from 'http-status-codes'
 import { decryptCredentialData } from '../../utils'
 import { getRunningExpressApp } from '../../utils/getRunningExpressApp'
 import { Credential } from '../../database/entities/Credential'
 import { InternalFlowiseError } from '../../errors/internalFlowiseError'
 import { getErrorMessage } from '../../errors/utils'
+import { getFileFromUpload, removeSpecificFileFromUpload } from 'flowise-components'
 
 // ----------------------------------------
 // Assistants
 // ----------------------------------------
 
 // List available assistants
-const getAllOpenaiAssistants = async (credentialId: string): Promise<any> => {
+const getAllOpenaiAssistants = async (credentialId: string, workspaceId: string): Promise<any> => {
     try {
         const appServer = getRunningExpressApp()
         const credential = await appServer.AppDataSource.getRepository(Credential).findOneBy({
-            id: credentialId
+            id: credentialId,
+            workspaceId: workspaceId
         })
         if (!credential) {
             throw new InternalFlowiseError(StatusCodes.NOT_FOUND, `Credential ${credentialId} not found in the database!`)
@@ -40,11 +41,12 @@ const getAllOpenaiAssistants = async (credentialId: string): Promise<any> => {
 }
 
 // Get assistant object
-const getSingleOpenaiAssistant = async (credentialId: string, assistantId: string): Promise<any> => {
+const getSingleOpenaiAssistant = async (credentialId: string, assistantId: string, workspaceId: string): Promise<any> => {
     try {
         const appServer = getRunningExpressApp()
         const credential = await appServer.AppDataSource.getRepository(Credential).findOneBy({
-            id: credentialId
+            id: credentialId,
+            workspaceId: workspaceId
         })
         if (!credential) {
             throw new InternalFlowiseError(StatusCodes.NOT_FOUND, `Credential ${credentialId} not found in the database!`)
@@ -68,10 +70,10 @@ const getSingleOpenaiAssistant = async (credentialId: string, assistantId: strin
         if (dbResponse.tool_resources?.file_search?.vector_store_ids?.length) {
             // Since there can only be 1 vector store per assistant
             const vectorStoreId = dbResponse.tool_resources.file_search.vector_store_ids[0]
-            const vectorStoreFiles = await openai.beta.vectorStores.files.list(vectorStoreId)
+            const vectorStoreFiles = await openai.vectorStores.files.list(vectorStoreId)
             const fileIds = vectorStoreFiles.data?.map((file) => file.id) ?? []
             ;(dbResponse.tool_resources.file_search as any).files = [...existingFiles.filter((file) => fileIds.includes(file.id))]
-            ;(dbResponse.tool_resources.file_search as any).vector_store_object = await openai.beta.vectorStores.retrieve(vectorStoreId)
+            ;(dbResponse.tool_resources.file_search as any).vector_store_object = await openai.vectorStores.retrieve(vectorStoreId)
         }
         return dbResponse
     } catch (error) {
@@ -82,10 +84,11 @@ const getSingleOpenaiAssistant = async (credentialId: string, assistantId: strin
     }
 }
 
-const uploadFilesToAssistant = async (credentialId: string, files: { filePath: string; fileName: string }[]) => {
+const uploadFilesToAssistant = async (credentialId: string, files: { filePath: string; fileName: string }[], workspaceId: string) => {
     const appServer = getRunningExpressApp()
     const credential = await appServer.AppDataSource.getRepository(Credential).findOneBy({
-        id: credentialId
+        id: credentialId,
+        workspaceId: workspaceId
     })
     if (!credential) {
         throw new InternalFlowiseError(StatusCodes.NOT_FOUND, `Credential ${credentialId} not found in the database!`)
@@ -101,13 +104,14 @@ const uploadFilesToAssistant = async (credentialId: string, files: { filePath: s
     const uploadedFiles = []
 
     for (const file of files) {
-        const toFile = await OpenAI.toFile(fs.readFileSync(file.filePath), file.fileName)
+        const fileBuffer = await getFileFromUpload(file.filePath)
+        const toFile = await OpenAI.toFile(fileBuffer, file.fileName)
         const createdFile = await openai.files.create({
             file: toFile,
             purpose: 'assistants'
         })
         uploadedFiles.push(createdFile)
-        fs.unlinkSync(file.filePath)
+        await removeSpecificFileFromUpload(file.filePath)
     }
 
     return uploadedFiles

@@ -1,12 +1,18 @@
 import express from 'express'
-import multer from 'multer'
-import path from 'path'
 import openaiAssistantsController from '../../controllers/openai-assistants'
+import { getMulterStorage } from '../../utils'
+import { checkAnyPermission } from '../../enterprise/rbac/PermissionCheck'
 
 const router = express.Router()
-const upload = multer({ dest: `${path.join(__dirname, '..', '..', '..', 'uploads')}/` })
 
 router.post('/download/', openaiAssistantsController.getFileFromAssistant)
-router.post('/upload/', upload.array('files'), openaiAssistantsController.uploadAssistantFiles)
+
+// permission check must precede multer to reject unauthorized requests before file parsing
+router.post(
+    '/upload/',
+    checkAnyPermission('assistants:create,assistants:update'),
+    getMulterStorage().array('files'),
+    openaiAssistantsController.uploadAssistantFiles
+)
 
 export default router

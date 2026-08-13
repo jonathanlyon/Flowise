@@ -11,23 +11,27 @@ class End_SeqAgents implements INode {
     category: string
     baseClasses: string[]
     credential: INodeParams
+    documentation?: string
     inputs: INodeParams[]
     hideOutput: boolean
 
     constructor() {
         this.label = 'End'
         this.name = 'seqEnd'
-        this.version = 1.0
+        this.version = 2.1
         this.type = 'End'
         this.icon = 'end.svg'
         this.category = 'Sequential Agents'
         this.description = 'End conversation'
         this.baseClasses = [this.type]
+        this.documentation = 'https://docs.flowiseai.com/using-flowise/agentflows/sequential-agents#id-10.-end-node'
         this.inputs = [
             {
-                label: 'Start | Agent | LLM | Tool Node',
+                label: 'Sequential Node',
                 name: 'sequentialNode',
-                type: 'Start | Agent | LLMNode | ToolNode'
+                type: 'Agent | Condition | LLMNode | ToolNode | CustomFunction | ExecuteFlow',
+                description:
+                    'Can be connected to one of the following nodes: Agent, Condition, LLM Node, Tool Node, Custom Function, Execute Flow'
             }
         ]
         this.hideOutput = true
